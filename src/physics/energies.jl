@@ -1,0 +1,121 @@
+# src/physics/energies.jl
+
+using Ferrite
+
+"""
+    elastic_energy(dh_u, dh_d, u_global, d_global, mat, cv_u, cv_d)
+
+计算弹性体能量 Ψ(u, d) = ∫_Ω [g(d) ψ₀⁺(ε) + ψ₀⁻(ε)] dΩ。
+
+在位移-控制加载条件下，总势能 ℱ = Ψ + 𝒢_f（无外力功）。
+"""
+function elastic_energy(
+    dh_u::DofHandler, dh_d::DofHandler,
+    u_global::Vector{Float64}, d_global::Vector{Float64},
+    mat::MaterialParams,
+    cv_u::CellValues, cv_d::CellValues,
+)
+    energy = 0.0
+    for (cell_u, cell_d) in zip(CellIterator(dh_u), CellIterator(dh_d))
+        reinit!(cv_u, cell_u)
+        reinit!(cv_d, cell_d)
+        u_loc = u_global[celldofs(cell_u)]
+        d_loc = d_global[celldofs(cell_d)]
+        for q_point in 1:getnquadpoints(cv_u)
+            dΩ = getdetJdV(cv_u, q_point)
+            ε_q = function_symmetric_gradient(cv_u, q_point, u_loc)
+            d_q = function_value(cv_d, q_point, d_loc)
+            energy += elastic_energy_density(ε_q, d_q, mat) * dΩ
+        end
+    end
+    return energy
+end
+
+"""
+    surface_energy(dh_d, d_global, mat, cv_d)
+
+计算断裂表面能 𝒢_f(d) = ∫_Ω g_c/(2l) [d² + l²|∇d|²] dΩ
+"""
+function surface_energy(
+    dh_d::DofHandler, d_global::Vector{Float64},
+    mat::MaterialParams{dim,T}, cv_d::CellValues
+) where {dim,T}
+    energy = 0.0
+
+    for cell in CellIterator(dh_d)
+        reinit!(cv_d, cell)
+
+        dofs_cell = celldofs(cell)
+        d_loc = d_global[dofs_cell]
+
+        for q_point in 1:getnquadpoints(cv_d)
+            dΩ = getdetJdV(cv_d, q_point)
+            d_q = function_value(cv_d, q_point, d_loc)
+            ∇d_q = function_gradient(cv_d, q_point, d_loc)
+            
+            # AT2 正则化裂纹密度积分 (mat.l 即为 ℓ_c)
+            energy += (mat.gc / (2.0 * mat.l)) * (d_q^2 + mat.l^2 * (∇d_q ⋅ ∇d_q)) * dΩ
+        end
+    end
+    return energy
+end
+
+"""
+    total_energy(dh_u, dh_d, u_global, d_global, mat, cv_u, cv_d)
+
+计算系统总能量 ℱ(u, d) = Ψ(u, d) + 𝒢_f(d)。
+
+当前算例采用位移-控制加载（Dirichlet BC），无外力功 Π_ext = 0。
+"""
+function total_energy(
+    dh_u::DofHandler, dh_d::DofHandler,
+    u_global::Vector{Float64}, d_global::Vector{Float64},
+    mat::MaterialParams,
+    cv_u::CellValues, cv_d::CellValues,
+)
+    return elastic_energy(dh_u, dh_d, u_global, d_global, mat, cv_u, cv_d) +
+           surface_energy(dh_d, d_global, mat, cv_d)
+end
+
+
+"""
+    nolinear_energy(dh_u, dh_d, u_global, d_global, mat, cv_u, cv_d)
+    计算非线性能量 E_nl = ∫_Ω [ψ(ε, d) - 0.5 ε:C₀:ε] dΩ，用于 SAV 方法中辅助变量 r 的计算。
+"""
+function nonlinear_energy(
+    dh_u::DofHandler, dh_d::DofHandler,
+    u_global::Vector{Float64}, d_global::Vector{Float64},
+    mat::MaterialParams{dim,T}, cv_u::CellValues, cv_d::CellValues
+) where {dim,T}
+    E_nl = 0.0
+
+    # 假设 dh_u 和 dh_d 共享相同的底层网格拓扑 (Cell 顺序一致)
+    for (cell_u, cell_d) in zip(CellIterator(dh_u), CellIterator(dh_d))
+        reinit!(cv_u, cell_u)
+        reinit!(cv_d, cell_d)
+
+        dofs_u = celldofs(cell_u)
+        dofs_d = celldofs(cell_d)
+        u_loc = u_global[dofs_u]
+        d_loc = d_global[dofs_d]
+
+        for q_point in 1:getnquadpoints(cv_u)
+            dΩ = getdetJdV(cv_u, q_point)
+
+            # 1. 获取积分点处的应变 ε 和损伤值 d_q
+            ε_q = function_symmetric_gradient(cv_u, q_point, u_loc)
+            d_q = function_value(cv_d, q_point, d_loc)
+
+            # 2. 计算积分点处的 damaged bulk energy
+            ψ_bulk = elastic_energy_density(ε_q, d_q, mat)
+
+            # 3. 计算积分点处的无损伤线性弹性参考能 (括号确保计算顺序和结合律正确)
+            ψ_linear = 0.5 * ε_q ⊡ (mat.C0 ⊡ ε_q)
+
+            # 4. 直接积分差值： E_nl = \int (ψ_bulk - ψ_linear) dΩ
+            E_nl += (ψ_bulk - ψ_linear) * dΩ
+        end
+    end
+
+    return E_nl
+end
