@@ -15,11 +15,14 @@ include("physics/energies.jl")
 # fem setup
 include("fem/setup.jl")
 include("fem/assembly.jl")
+include("fem/assembly_rlm.jl")
 
 # solvers
 include("solvers/sav.jl")
 include("solvers/sav_quasistatic.jl")
 include("solvers/staggered.jl")
+include("solvers/rlm_amor.jl")
+include("solvers/rlm_bdf2.jl")
 
 # utilities
 include("utils/utils_fun.jl")
@@ -31,6 +34,8 @@ export
     SimulationState,
     TensionSetup,
     TensionSetupSAV,
+    RLMParams,
+    RLMState,
     # --- setups ---
     setup_tension,
     setup_tension_sav,
@@ -38,6 +43,8 @@ export
     solve_sav,
     solve_sav_quasistatic,
     solve_staggered,
+    solve_rlm_amor,
+    solve_rlm_bdf2,
     # --- state ---
     update_states!,
     # --- utilities ---

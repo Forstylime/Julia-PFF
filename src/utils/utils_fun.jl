@@ -72,7 +72,9 @@ end
 计算F_{reaction}, 用于提取反力。
 """
 function compute_reaction_forces(f_reac_dof, K_u, R_u, dh_u, dh_d, u_n, d_n, mat, cv_u, cv_d)
-    # 计算整张网格的内力 (包含所有未被零化边界条件破坏的力)
+    # 计算整张网格的内力前必须清空矩阵和向量，否则会累加之前的虚假力或边界条件残留
+    fill!(K_u.nzval, 0.0)
+    fill!(R_u, 0.0)
     assemble_u!(K_u, R_u, dh_u, dh_d, u_n, d_n, mat, cv_u, cv_d)
         
     # 提取右边竖向位移自由度的反力并求和，得到总反力
@@ -134,4 +136,108 @@ function compute_sav_scalars(
     A = 1.0 - integral_A / denom
     B = r_n + integral_B / denom
     return A, B
+end
+
+# ==============================================================================
+# 自定义求根函数 (Brent's Method)
+# 接口仿照 Roots.jl，以便未来无缝切换
+# ==============================================================================
+
+struct Brent end
+
+"""
+    find_zero(f, bracket::Tuple{T, T}, ::Brent; tol=1e-12, max_iter=100) where {T<:Real}
+
+使用 Brent 法寻找一维连续函数 f 的根。如果初始 bracket [a, b] 对应的函数值同号，
+会自动向外扩展区间进行搜寻（步进法扩展策略）。
+"""
+function find_zero(f, bracket::Tuple{T, T}, ::Brent; tol=1e-12, max_iter=100) where {T<:Real}
+    a, b = bracket
+    fa = f(a)
+    fb = f(b)
+
+    # 自动扩展区间 Fallback 策略
+    expand_iter = 0
+    while fa * fb > 0 && expand_iter < 20
+        # 如果同号，向外扩展 50% 的区间长度
+        width = (b - a)
+        if abs(fa) < abs(fb)
+            a = a - 0.5 * width
+            fa = f(a)
+        else
+            b = b + 0.5 * width
+            fb = f(b)
+        end
+        expand_iter += 1
+    end
+    
+    if fa * fb > 0
+        error("Brent method failed to find a bracketing interval. Last bracket: [$a, $b], fa=$fa, fb=$fb")
+    end
+
+    if abs(fa) < abs(fb)
+        a, b = b, a
+        fa, fb = fb, fa
+    end
+
+    c = a
+    fc = fa
+    d = 0.0
+    mflag = true
+
+    for _ in 1:max_iter
+        if fa != fc && fb != fc
+            # 逆二次插值 (Inverse quadratic interpolation)
+            s = a * fb * fc / ((fa - fb) * (fa - fc)) +
+                b * fa * fc / ((fb - fa) * (fb - fc)) +
+                c * fa * fb / ((fc - fa) * (fc - fb))
+        else
+            # 割线法 (Secant method)
+            s = b - fb * (b - a) / (fb - fa)
+        end
+
+        # 判断是否需要回退到二分法 (Bisection method)
+        # 这里条件 1 的原意是检查 s 是否在 (3a+b)/4 和 b 之间，但要注意 a 和 b 的大小关系
+        if a < b
+            cond1 = (s < (3 * a + b) / 4 || s > b)
+        else
+            cond1 = (s > (3 * a + b) / 4 || s < b)
+        end
+        cond2 = mflag && (abs(s - b) >= abs(b - c) / 2)
+        cond3 = !mflag && (abs(s - b) >= abs(c - d) / 2)
+        cond4 = mflag && (abs(b - c) < tol)
+        cond5 = !mflag && (abs(c - d) < tol)
+
+        if cond1 || cond2 || cond3 || cond4 || cond5
+            s = (a + b) / 2
+            mflag = true
+        else
+            mflag = false
+        end
+
+        fs = f(s)
+        d = c
+        c = b
+        fc = fb
+
+        if fa * fs < 0
+            b = s
+            fb = fs
+        else
+            a = s
+            fa = fs
+        end
+
+        if abs(fa) < abs(fb)
+            a, b = b, a
+            fa, fb = fb, fa
+        end
+
+        if fb == 0.0 || abs(b - a) < tol
+            return b
+        end
+    end
+
+    @warn "Brent method reached max_iter without fully converging."
+    return b
 end
