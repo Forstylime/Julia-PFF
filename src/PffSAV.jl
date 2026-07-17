@@ -9,17 +9,22 @@ using Tensors
 
 # physics
 include("physics/types.jl")
+include("physics/ch_types.jl")
 include("physics/constitutive.jl")
 include("physics/energies.jl")
+include("physics/ch_energies.jl")
 
 # fem setup
 include("fem/setup.jl")
+include("fem/ch_setup.jl")
 include("fem/assembly.jl")
+include("fem/ch_assembly.jl")
 
 # solvers
 include("solvers/sav.jl")
 include("solvers/sav_quasistatic.jl")
 include("solvers/staggered.jl")
+include("solvers/rlm_ch.jl")
 
 # utilities
 include("utils/utils_fun.jl")
@@ -31,13 +36,18 @@ export
     SimulationState,
     TensionSetup,
     TensionSetupSAV,
+    CHParams,
+    CHState,
+    CHSetup,
     # --- setups ---
     setup_tension,
     setup_tension_sav,
+    setup_ch,
     # --- solvers ---
     solve_sav,
     solve_sav_quasistatic,
     solve_staggered,
+    solve_rlm_ch,
     # --- state ---
     update_states!,
     # --- utilities ---
@@ -48,5 +58,7 @@ export
     # --- constitutive ---
     evaluate_damaged_stress,
     tensile_energy_density,
-    elastic_energy_density_tensile
+    elastic_energy_density_tensile,
+    ch_F,
+    ch_f
 end

@@ -1,8 +1,7 @@
 .vscode/
 .claude/
-.codegraph/
 data/
-reference/
+scratch/
 
 # Julia build/cache artifacts
 *.ji
