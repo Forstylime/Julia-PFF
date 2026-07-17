@@ -1,4 +1,5 @@
 name = "PffSAV"
+uuid = "ef43830b-beed-40c7-a452-d5c6a48bec2e"
 version = "0.1.0"
 authors = ["Weiqian Xu"]
 
@@ -20,7 +21,17 @@ TimerOutputs = "a759f4b9-e2f1-59dc-863e-4aeb61b1ea8f"
 WriteVTK = "64499a7a-5c06-52f2-abe2-ccb03c286192"
 
 [compat]
-FerriteGmsh = "1.3.0"
-JLD2 = "0.6.4"
-LaTeXStrings = "1.4.0"
-Serialization = "1.11.0"
+Ferrite = "=1.4.1"
+FerriteGmsh = "=1.3.0"
+JLD2 = "=0.6.4"
+LaTeXStrings = "=1.4.0"
+Serialization = "=1.11.0"
+Tensors = "=1.17.1"
+WriteVTK = "=1.22.0"
+julia = "=1.12.5"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

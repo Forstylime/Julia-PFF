@@ -107,45 +107,6 @@ function elastic_energy_densities(mode::ElasticMode, ε::SymmetricTensor{2, dim,
 end
 
 
-# ------------------------------------------------------------------------------
-# 5. 应力张量计算 (Cauchy Stress)
-# ------------------------------------------------------------------------------
-"""
-    elastic_stresses_0(mode::ElasticMode, ε::SymmetricTensor{2, dim, T}, params::MaterialParams{T}) where {dim, T}
-
-计算无损伤状态下的拉伸应力张量 \$\\boldsymbol{\\sigma}_0^+\$ 和压缩应力张量 \$\\boldsymbol{\\sigma}_0^-\$。
-"""
-function elastic_stresses_0(mode::ElasticMode, ε::SymmetricTensor{2, dim, T}, params::MaterialParams{dim}) where {dim, T}
-    ε_plus, ε_minus = spectral_decomposition(ε)
-
-    tr_ε = tr(ε)
-    tr_ε_plus = max(tr_ε, zero(T))
-    tr_ε_minus = tr_ε - tr_ε_plus
-
-    λ_eff = effective_lambda(mode, params)
-    μ = params.μ
-    I2 = one(SymmetricTensor{2, dim, T}) # 2阶单位对称张量
-
-    σ0_plus = λ_eff * tr_ε_plus * I2 + 2 * μ * ε_plus
-    σ0_minus = λ_eff * tr_ε_minus * I2 + 2 * μ * ε_minus
-
-    return σ0_plus, σ0_minus
-end
-
-
-"""
-    cauchy_stress(mode::ElasticMode, ε::SymmetricTensor{2, dim, T}, d::T, params::MaterialParams{T}) where {dim, T}
-
-计算经典的（非 SAV）退化 Cauchy 应力张量 \$\\boldsymbol{\\sigma}\$ (Eq. 17)：
-\$\\boldsymbol{\\sigma} = g(d)\\boldsymbol{\\sigma}_0^+ + \\boldsymbol{\\sigma}_0^-\$
-"""
-function cauchy_stress(mode::ElasticMode, ε::SymmetricTensor{2, dim, T}, d::T, params::MaterialParams{dim}) where {dim, T}
-    σ0_plus, σ0_minus = elastic_stresses_0(mode, ε, params)
-    g_d = (one(T) - d)^2 + params.k # 退化函数 g(d) = (1-d)^2 + k
-    return g_d * σ0_plus + σ0_minus
-end
-
-
 """
     elastic_energy_density(ε::SymmetricTensor{2,2}, d::Real, mat::MaterialParams{T})
 
@@ -162,44 +123,3 @@ function elastic_energy_density(ε::SymmetricTensor{2,dim,T}, d::Real, mat::Mate
 
     return g_d * Ψ_plus + Ψ_minus
 end
-
-
-# ------------------------------------------------------------------------------
-# 6. SAV 辅助函数
-# ------------------------------------------------------------------------------
-"""
-    evaluate_damaged_stress(ε, d, mat)
-
-计算受损 Cauchy 应力: σ = g(d)σ₀⁺ + σ₀⁻
-`cauchy_stress` 的便捷封装，默认使用 PlaneStrain 模式。
-"""
-function evaluate_damaged_stress(
-    ε::SymmetricTensor{2, dim, T}, d::T, mat::MaterialParams{dim}
-) where {dim, T}
-    return cauchy_stress(PlaneStrain(), ε, d, mat)
-end
-
-"""
-    tensile_energy_density(ε, mat)
-
-返回无损拉伸应变能密度 ψ₀⁺(ε)。
-"""
-function tensile_energy_density(
-    ε::SymmetricTensor{2, dim, T}, mat::MaterialParams{dim}
-) where {dim, T}
-    ψ_plus, _ = elastic_energy_densities(PlaneStrain(), ε, mat)
-    return ψ_plus
-end
-
-"""
-    elastic_energy_density_tensile(ε, mat)
-
-`tensile_energy_density` 的别名，用于 SAV 标量计算。
-"""
-function elastic_energy_density_tensile(
-    ε::SymmetricTensor{2, dim, T}, mat::MaterialParams{dim}
-) where {dim, T}
-    return tensile_energy_density(ε, mat)
-end
-
-
