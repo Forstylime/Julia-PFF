@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "003053666bb8f9276dfe0ae032f0eb4bbdd066ff"
+project_hash = "0509248f67f322ea83be155a5d3990f5acd99712"
 
 [[deps.AbstractFFTs]]
 deps = ["LinearAlgebra"]
@@ -1273,6 +1273,12 @@ deps = ["Dates", "PrecompileTools", "UUIDs"]
 git-tree-sha1 = "32a4e09c5f29402573d673901778a0e03b0807b9"
 uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
 version = "2.8.6"
+
+[[deps.PffSAV]]
+deps = ["BlockArrays", "CairoMakie", "DrWatson", "Ferrite", "FerriteGmsh", "FerriteMeshParser", "ForwardDiff", "JLD2", "LaTeXStrings", "LinearAlgebra", "Serialization", "SparseArrays", "Tensors", "TimerOutputs", "WriteVTK"]
+path = "."
+uuid = "ef43830b-beed-40c7-a452-d5c6a48bec2e"
+version = "0.1.0"
 
 [[deps.Pixman_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "LLVMOpenMP_jll", "Libdl"]
