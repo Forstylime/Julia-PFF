@@ -4,6 +4,21 @@ using Ferrite
 using PffSAV
 using Tensors
 
+@testset "staggered material parameters" begin
+    material = MaterialParams(E = 1_000, gc = 1, l = 2)
+
+    @test material.E === 1_000.0
+    @test material.gc === 1.0
+    @test material.l === 2.0
+    @test material.λ > 0
+    @test material.μ > 0
+    @test_throws ArgumentError MaterialParams(E = 0)
+    @test_throws ArgumentError MaterialParams(ν = 0.5)
+    @test_throws ArgumentError MaterialParams(gc = 0)
+    @test_throws ArgumentError MaterialParams(l = 0)
+    @test_throws ArgumentError MaterialParams(k = 0)
+end
+
 const MAT = RLMMaterialConfig(
     E = 1_000.0,
     nu = 0.25,

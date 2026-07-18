@@ -8,14 +8,14 @@ using Serialization, Ferrite, FerriteGmsh
 该结构体把后续求解器需要反复使用的对象集中在一起：计算网格、位移场和
 相场的自由度处理器、两类场的约束处理器，以及用于设置预制裂纹的节点编号。
 """
-Base.@kwdef struct TensionSetup{Int,G,DHU,DHD,CHU,CHD,Float64}
+Base.@kwdef struct TensionSetup{G,DHU,DHD,CHU,CHD,T<:AbstractFloat}
     dir::Int
     grid::G
     dh_u::DHU
     dh_d::DHD
     ch_u::CHU
     ch_d::CHD
-    final_displacement::Float64
+    final_displacement::T
 end
 
 """
@@ -68,6 +68,7 @@ end
 创建位移场的 Dirichlet 边界条件。
 """
 function create_displacement_constraints(dh_u, grid, fixed_face = "top", final_displacement = 0.0, dir = 2)
+    dir in (1, 2) || throw(ArgumentError("dir must be 1 (x) or 2 (y)"))
     ch_u = Ferrite.ConstraintHandler(dh_u)
 
     # 读取网格生成阶段创建的边界 facet set。
@@ -124,5 +125,13 @@ function setup_tension(;
     ch_d = create_phase_field_constraints(dh_d)
 
     # 统一封装初始化结果，减少求解脚本需要手动传递的对象数量。
-    return TensionSetup(dir, grid, dh_u, dh_d, ch_u, ch_d, final_displacement)
+    return TensionSetup(
+        dir,
+        grid,
+        dh_u,
+        dh_d,
+        ch_u,
+        ch_d,
+        float(final_displacement),
+    )
 end

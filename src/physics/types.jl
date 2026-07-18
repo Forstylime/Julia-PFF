@@ -16,8 +16,6 @@ dim 为空间维度，T 为浮点精度。
 - `ν`: 泊松比
 - `gc`: 临界能量释放率（断裂韧性）
 - `l`: 正则化相场尺度参数 ℓ_c
-- `η`: 相场演化的动力学粘性参数
-- `ρ`: 材料质量密度
 - `k`: 极小残留刚度参数，防止完全损坏时刚度矩阵奇异
 
 # 自动计算字段
@@ -31,36 +29,41 @@ struct MaterialParams{dim, T<:AbstractFloat}
     μ::T
     gc::T
     l::T
-    η::T
-    ρ::T
     C0::SymmetricTensor{4, dim, T}
     k::T
 end
 
 function MaterialParams(;
-    dim::Int = 2,
-    E::T = 25840.0,
-    ν::T = 0.18,
-    gc::T = 0.65,
-    l::T = 10.0,
-    η::T = 0.05,
-    ρ::T = 1.0,
-    k::T = 1e-6,
-) where {T<:AbstractFloat}
-    λ_val = (E * ν) / ((1 + ν) * (1 - 2ν))  # plane strain
-    μ_val = E / (2 * (1 + ν))
+    dim::Integer = 2,
+    E::Real = 25_840.0,
+    ν::Real = 0.18,
+    gc::Real = 0.65,
+    l::Real = 10.0,
+    k::Real = 1.0e-6,
+)
+    dim > 0 || throw(ArgumentError("dim must be positive"))
 
-    @assert λ_val > 0 "Lamé 常数 λ 必须大于 0"
-    @assert μ_val > 0 "剪切模量 μ 必须大于 0"
-    @assert gc > 0 "断裂韧性 gc 必须大于 0"
-    @assert l > 0 "长度尺度 l 必须大于 0"
-    @assert η >= 0 "粘性参数 η 必须非负"
-    @assert ρ > 0 "密度 ρ 必须大于 0"
-    @assert 0 < k < 1e-2 "残留刚度 k 应为极小的正数"
+    T = promote_type(
+        typeof(float(E)),
+        typeof(float(ν)),
+        typeof(float(gc)),
+        typeof(float(l)),
+        typeof(float(k)),
+    )
+    E, ν, gc, l, k = T.((E, ν, gc, l, k))
+
+    E > 0 || throw(ArgumentError("Young's modulus E must be positive"))
+    0 < ν < 0.5 || throw(ArgumentError("Poisson's ratio ν must satisfy 0 < ν < 0.5"))
+    gc > 0 || throw(ArgumentError("fracture toughness gc must be positive"))
+    l > 0 || throw(ArgumentError("length scale l must be positive"))
+    0 < k < 1.0e-2 || throw(ArgumentError("residual stiffness k must satisfy 0 < k < 1e-2"))
+
+    λ_val = (E * ν) / ((1 + ν) * (1 - 2ν)) # Plane strain
+    μ_val = E / (2 * (1 + ν))
 
     I2 = one(SymmetricTensor{2, dim, T})
     I4_sym = one(SymmetricTensor{4, dim, T})
     C0_val = λ_val * (I2 ⊗ I2) + 2μ_val * I4_sym
 
-    return MaterialParams{dim, T}(E, ν, λ_val, μ_val, gc, l, η, ρ, C0_val, k)
+    return MaterialParams{Int(dim),T}(E, ν, λ_val, μ_val, gc, l, C0_val, k)
 end

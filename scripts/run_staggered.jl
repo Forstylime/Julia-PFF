@@ -1,84 +1,106 @@
-using PffSAV
-using Ferrite
-using FerriteGmsh
-
-# 快速示例：从项目根目录运行
-#   julia --project=. scripts/run_staggered.jl
-
-mat = MaterialParams(;
-    dim = 2,
-    E  = 25840.0,
-    ν  = 0.18,
-    gc = 0.65,
-    l  = 10.0,
-    η  = 1e-5,
-    ρ  = 2.4e-9,
-    k  = 1e-8
-)
-
-setup = setup_tension(
-    msh_file = "data/mesh/l_shape.msh",
-    final_displacement = -0.8, # 施加位移
-    fixed_face = "top", # 固定边界名称
-    dir = 2, # 位移施加方向，x方向为1，y方向为2
-)
-
-
-disp, force, psi_energy, gf_energy = solve_staggered(setup, mat;
-    n_steps = 100,
-    max_iter = 2000, 
-    enforce_irreversibility = true,
-) # 实际最终位移为 setup.final_displacement
-
-# 可视化载荷-位移曲线 and 能量演变
-mkpath("data/plots")
-mkpath("data/jld2")
 using CairoMakie
-
-disp_plot = sign(setup.final_displacement)*disp
-force_plot = sign(setup.final_displacement)*force
-
-# 找到峰值载荷及其对应位移
-peak_idx = argmax(force_plot)
-peak_force = force_plot[peak_idx]
-peak_disp = disp_plot[peak_idx]
-println("峰值载荷: F_max = $(round(peak_force, digits=4)) N @ ū = $(round(peak_disp, digits=4)) mm")
-
-# 图一：载荷-位移曲线
-fig_load = Figure(size = (600, 400))
-ax_load = Axis(fig_load[1, 1],
-    xlabel = L"\bar{u}~\mathrm{[mm]}",
-    ylabel = L"F_{\mathrm{reaction}}~\mathrm{[N]}",
-    title = "Displacement - Reaction Force Curve",
-    #limits = ((0, maximum(disp_plot)), (0, nothing)),
-    xgridvisible = true,
-    ygridvisible = true,
-    xgridcolor = :lightgray,
-    ygridcolor = :lightgray,
-)
-lines!(ax_load, disp_plot, force_plot; linewidth = 2, color = :red, linestyle = :solid) # 红色虚线
-save("data/plots/load_displacement_staggered.png", fig_load)
-
-# 图二：能量演变
-fig_energy = Figure(size = (600, 400))
-ax_energy = Axis(fig_energy[1, 1],
-    xlabel = L"\bar{u}~\mathrm{[mm]}",
-    ylabel = L"\mathcal{G}_f\ \mathrm{(surface)} [N·mm]",
-    title = L"\mathcal{G}_f\ \mathrm{(surface)} Evolution",
-    #limits = ((0, maximum(disp_plot)), (0, 1.5)),
-    xgridvisible = true,
-    ygridvisible = true,
-    xgridcolor = :lightgray,
-    ygridcolor = :lightgray,
-)
-#lines!(ax_energy, disp_plot, psi_energy; linewidth = 2, color = :steelblue, label = L"\Psi\ \mathrm{(elastic)}")
-lines!(ax_energy, disp_plot, gf_energy; linewidth = 2, color = :darkorange, label = L"\mathcal{G}_f\ \mathrm{(surface)}")
-save("data/plots/energy_evolution_staggered.png", fig_energy)
-
-println("载荷-位移曲线已保存至 data/plots/load_displacement_staggered.png。")
-println("能量演变曲线已保存至 data/plots/energy_evolution_staggered.png。")
-
-# 保存数据以供后续分析
 using JLD2
-@save "data/jld2/staggered_results.jld2" disp force psi_energy gf_energy
-println("Staggered 仿真数据已保存至 data/jld2/staggered_results.jld2。")
+using PffSAV
+
+const PROJECT_ROOT = normpath(joinpath(@__DIR__, ".."))
+const PLOT_DIRECTORY = joinpath(PROJECT_ROOT, "data", "plots")
+const RESULT_DIRECTORY = joinpath(PROJECT_ROOT, "data", "jld2")
+const VTK_DIRECTORY = joinpath(PROJECT_ROOT, "data", "sims", "staggered")
+
+function plot_results(setup, displacement, force, _elastic_energy, surface_energy)
+    direction_sign = sign(setup.final_displacement)
+    plotted_displacement = direction_sign .* displacement
+    plotted_force = direction_sign .* force
+
+    peak_index = argmax(plotted_force)
+    peak_force = plotted_force[peak_index]
+    peak_displacement = plotted_displacement[peak_index]
+    println(
+        "Peak load: F_max = $(round(peak_force; digits = 4)) N ",
+        "@ ū = $(round(peak_displacement; digits = 4)) mm",
+    )
+
+    load_figure = Figure(size = (600, 400))
+    load_axis = Axis(
+        load_figure[1, 1];
+        xlabel = L"\bar{u}~\mathrm{[mm]}",
+        ylabel = L"F_{\mathrm{reaction}}~\mathrm{[N]}",
+        title = "Displacement – Reaction Force",
+        xgridvisible = true,
+        ygridvisible = true,
+        xgridcolor = :lightgray,
+        ygridcolor = :lightgray,
+    )
+    lines!(load_axis, plotted_displacement, plotted_force; color = :red, linewidth = 2)
+    load_plot_path = joinpath(PLOT_DIRECTORY, "load_displacement_staggered.png")
+    save(load_plot_path, load_figure)
+
+    energy_figure = Figure(size = (600, 400))
+    energy_axis = Axis(
+        energy_figure[1, 1];
+        xlabel = L"\bar{u}~\mathrm{[mm]}",
+        ylabel = L"\mathcal{G}_f~\mathrm{[N\,mm]}",
+        title = L"\mathcal{G}_f\ \mathrm{(surface)\ Evolution}",
+        xgridvisible = true,
+        ygridvisible = true,
+        xgridcolor = :lightgray,
+        ygridcolor = :lightgray,
+    )
+    lines!(
+        energy_axis,
+        plotted_displacement,
+        surface_energy;
+        color = :orange,
+        label = L"\mathcal{G}_f\ \mathrm{(surface)}",
+        linewidth = 2,
+    )
+    energy_plot_path = joinpath(PLOT_DIRECTORY, "energy_evolution_staggered.png")
+    save(energy_plot_path, energy_figure)
+
+    println("Load-displacement curve saved to $load_plot_path")
+    println("Energy evolution curve saved to $energy_plot_path")
+    return nothing
+end
+
+function main()
+    material = MaterialParams(;
+        dim = 2,
+        E = 25_840.0,
+        ν = 0.18,
+        gc = 0.65,
+        l = 10.0,
+        k = 1.0e-8,
+    )
+    setup = setup_tension(;
+        msh_file = joinpath(PROJECT_ROOT, "data", "mesh", "l_shape.msh"),
+        final_displacement = -0.8,
+        fixed_face = "top",
+        dir = 2,
+    )
+
+    displacement, force, elastic_energy, surface_energy = solve_staggered(
+        setup,
+        material;
+        n_steps = 100,
+        max_iter = 2_000,
+        enforce_irreversibility = true,
+        output_directory = VTK_DIRECTORY,
+    )
+
+    mkpath(PLOT_DIRECTORY)
+    mkpath(RESULT_DIRECTORY)
+    plot_results(setup, displacement, force, elastic_energy, surface_energy)
+
+    result_path = joinpath(RESULT_DIRECTORY, "staggered_results.jld2")
+    jldsave(
+        result_path;
+        displacement,
+        force,
+        elastic_energy,
+        surface_energy,
+    )
+    println("Staggered simulation data saved to $result_path")
+    return nothing
+end
+
+main()
