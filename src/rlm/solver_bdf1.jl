@@ -312,8 +312,11 @@ end
     solve_rlm_bdf1(problem)
 
 Run outer displacement increments and inner fixed-load BDF1 relaxation. Load
-resets follow section 19. A failed trial is reported and returned without
-changing the last accepted `RLMState`.
+resets follow section 19. With `relaxation_mode=:to_tolerance`, each load level
+must meet the configured phase and q tolerances. With `:fixed_steps`, exactly
+`max_relax_steps` accepted pseudo-time steps are used to validate the RLM
+algebra and energy identity without claiming steady-state convergence. A failed
+trial is reported and returned without changing the last accepted `RLMState`.
 """
 function solve_rlm_bdf1(problem::RLMProblem)
     config = problem.config
@@ -389,12 +392,20 @@ function solve_rlm_bdf1(problem::RLMProblem)
                 "heal=$(diagnostic.healing)",
             )
 
-            if relax_step >= config.time.min_relax_steps &&
+            if config.time.relaxation_mode == :to_tolerance &&
+               relax_step >= config.time.min_relax_steps &&
                trial.phase_relative_increment < config.tolerances.phase &&
                abs(trial.q - 1.0) < config.tolerances.q
                 converged_this_load = true
                 break
             end
+        end
+
+        if config.time.relaxation_mode == :fixed_steps
+            # Every requested step has passed the branch, scalar-root, and
+            # proxy-energy checks. This completes a validation trajectory, not
+            # a claim that the fixed-load phase field has reached equilibrium.
+            converged_this_load = true
         end
 
         if !converged_this_load
@@ -411,6 +422,12 @@ function solve_rlm_bdf1(problem::RLMProblem)
             _write_rlm_vtk(problem, state, load_step)
         end
         _flush_outputs(problem, diagnostics)
+    end
+
+    if config.time.relaxation_mode == :fixed_steps
+        message = "all fixed-step RLM validation stages completed " *
+                  "(steady-state convergence was not requested)"
+        return RLMResult(true, false, message, state, diagnostics, problem)
     end
 
     message = "all load steps converged"

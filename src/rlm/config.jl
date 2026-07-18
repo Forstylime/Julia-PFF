@@ -28,10 +28,11 @@ Base.@kwdef struct RLMLoadConfig
     traction::NTuple{2, Float64} = (0.0, 0.0)
 end
 
-"""BDF1 step size, fixed RLM energy parameter, and relaxation limits."""
+"""BDF1 step size, fixed RLM energy parameter, and relaxation controls."""
 Base.@kwdef struct RLMTimeConfig
     dt::Float64 = 1.0e-3
     alpha::Float64 = 1.0
+    relaxation_mode::Symbol = :to_tolerance
     min_relax_steps::Int = 1
     max_relax_steps::Int = 100
 end
@@ -217,6 +218,9 @@ function validate_config(config::RLMConfig)
         throw(ArgumentError("time.dt and time.alpha must be finite"))
     time.dt > 0.0 || throw(ArgumentError("time.dt must be positive"))
     time.alpha > 0.0 || throw(ArgumentError("time.alpha must be a positive energy"))
+    time.relaxation_mode in (:to_tolerance, :fixed_steps) || throw(ArgumentError(
+        "time.relaxation_mode must be :to_tolerance or :fixed_steps",
+    ))
     time.min_relax_steps >= 1 || throw(ArgumentError("time.min_relax_steps must be at least one"))
     time.max_relax_steps >= time.min_relax_steps ||
         throw(ArgumentError("time.max_relax_steps must not be smaller than min_relax_steps"))

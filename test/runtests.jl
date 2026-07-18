@@ -29,7 +29,13 @@ const MAT = RLMMaterialConfig(
 )
 const TOL = RLMToleranceConfig()
 
-function small_config(; scalar_residual = 1.0e-10, phase = 1.0, q = 1.0, max_relax = 4)
+function small_config(;
+    scalar_residual = 1.0e-10,
+    phase = 1.0,
+    q = 1.0,
+    max_relax = 4,
+    relaxation_mode = :to_tolerance,
+)
     return RLMConfig(
         material = MAT,
         mesh = RLMMeshConfig(path = "unused", quadrature_order = 2),
@@ -44,6 +50,7 @@ function small_config(; scalar_residual = 1.0e-10, phase = 1.0, q = 1.0, max_rel
         time = RLMTimeConfig(
             dt = 1.0e-3,
             alpha = 10.0,
+            relaxation_mode = relaxation_mode,
             min_relax_steps = 1,
             max_relax_steps = max_relax,
         ),
@@ -298,4 +305,24 @@ end
         @test occursin("q_minus_one", text)
         @test occursin("healing", text)
     end
+end
+
+
+@testset "fixed-step RLM validation mode" begin
+    config = small_config(
+        phase = 0.0,
+        q = 0.0,
+        max_relax = 3,
+        relaxation_mode = :fixed_steps,
+    )
+    problem = build_rlm_problem(config; grid = small_grid())
+    result = solve_rlm_bdf1(problem)
+
+    @test result.success
+    @test !result.converged
+    @test occursin("steady-state convergence was not requested", result.message)
+    accepted = filter(d -> d.status == "accepted", result.diagnostics)
+    @test length(accepted) == config.load.load_steps * config.time.max_relax_steps
+    @test all(d -> d.scalar_residual <= config.tolerances.scalar_residual, accepted)
+    @test all(d -> isfinite(d.energy_balance_residual), accepted)
 end

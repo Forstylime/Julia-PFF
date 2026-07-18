@@ -12,7 +12,7 @@ config = RLMConfig(
         mobility = 20.0,
     ),
     mesh = RLMMeshConfig(
-        path = joinpath(project_root, "l_shape.msh"),
+        path = joinpath(project_root, "data", "mesh", "l_shape.msh"),
         quadrature_order = 2,
     ),
     load = RLMLoadConfig(
@@ -21,7 +21,8 @@ config = RLMConfig(
         component = 2,
         overlap_policy = :loaded,
         final_displacement = -0.01,
-        load_steps = 20,
+        # One fixed load level is enough for the first end-to-end smoke test.
+        load_steps = 1,
         initial_damage = 0.0,
         body_force = (0.0, 0.0),
         traction_boundary = nothing,
@@ -30,8 +31,11 @@ config = RLMConfig(
     time = RLMTimeConfig(
         dt = 1.0e-3,
         alpha = 1.0,
+        # Minimal feasibility run: validate a short RLM trajectory without
+        # interpreting an increment tolerance as quasi-static convergence.
+        relaxation_mode = :fixed_steps,
         min_relax_steps = 1,
-        max_relax_steps = 100,
+        max_relax_steps = 3,
     ),
     tolerances = RLMToleranceConfig(
         principal_zero_abs = 1.0e-14,
@@ -45,7 +49,7 @@ config = RLMConfig(
         q = 1.0e-6,
     ),
     output = RLMOutputConfig(
-        directory = joinpath(project_root, "data", "sims", "rlm_bdf1"),
+        directory = joinpath(project_root, "data", "sims", "rlm_bdf1_minimal"),
         write_csv = true,
         write_vtk = true,
         vtk_every_load_step = 1,
@@ -57,3 +61,11 @@ problem = build_rlm_problem(config)
 result = solve_rlm_bdf1(problem)
 println(result.message)
 result.success || exit(1)
+
+accepted = filter(diagnostic -> diagnostic.status == "accepted", result.diagnostics)
+println(
+    "validated RLM steps=$(length(accepted)), " *
+    "max scalar residual=$(maximum(d.scalar_residual for d in accepted)), " *
+    "max energy-balance residual=$(maximum(d.energy_balance_residual for d in accepted)), " *
+    "final damage range=[$(minimum(result.state.d)), $(maximum(result.state.d))]",
+)
