@@ -30,6 +30,8 @@ end
     h = RLMPiecewiseLinearHistory([0, 1, 3], [0, 2, 1])
     @test history_value(h, 0.5) == 1.0
     @test history_value(h, 2.0) == 1.5
+    @test history_value(RLMPiecewiseLinearHistory([0.0, 1.2], [0.0, 1.0]),
+        1.2000000000000002) == 1.0
     @test_throws ArgumentError history_value(h, -0.1)
     @test_throws ArgumentError RLMPiecewiseLinearHistory([0, 1], [0])
     @test_throws ArgumentError RLMPiecewiseLinearHistory([0, 0], [0, 1])

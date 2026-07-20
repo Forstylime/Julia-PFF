@@ -5,12 +5,12 @@ project_root = normpath(joinpath(@__DIR__, ".."))
 ramp_time = 1.0
 # Hold after the ramp; `final_time` must be strictly larger than `ramp_time`
 # because the piecewise-linear history requires strictly increasing knots.
-final_time = 1.5
-dt = 0.001
+final_time = 1.3
+dt = 0.00001
 
 config = RLMConfig(
     material = RLMMaterialConfig(E = 25_840.0, nu = 0.18, G_c = 0.65, ell = 10.0,
-        kappa = 1.0e-6, viscosity = 0.001),
+        kappa = 1.0e-8, viscosity = 0.001),
     mesh = RLMMeshConfig(path = joinpath(project_root, "data", "mesh", "l_shape.msh"), quadrature_order = 2),
     load = RLMLoadConfig(fixed_boundary = "top", loaded_boundary = "right", component = 2,
         overlap_policy = :loaded, displacement_amplitude = -0.8,
@@ -19,7 +19,7 @@ config = RLMConfig(
         traction_history = RLMPiecewiseLinearHistory([0.0, final_time], [0.0, 0.0])),
     time = RLMTimeConfig(final_time = final_time, dt = dt, alpha = 1_000.0),
     output = RLMOutputConfig(directory = joinpath(project_root, "data", "sims", "rlm_bdf1_realtime"),
-        write_csv = true, write_vtk = true, vtk_every_time_step = 100, verbose = false),
+        write_csv = true, write_vtk = true, vtk_every_time_step = 1000, verbose = false),
 )
 
 result = solve_rlm_bdf1(build_rlm_problem(config))
@@ -47,4 +47,4 @@ lines!(ax4, times, proxy; label = "proxy internal", linewidth = 2)
 lines!(ax4, times, work; label = "external work", linewidth = 2)
 lines!(ax4, times, dissipation; label = "cumulative dissipation", linewidth = 2)
 axislegend(ax4)
-save(joinpath(config.output.directory, "realtime_histories.png"), figure)
+save(joinpath(project_root, "data", "plots", "rlm_bdf1.png"), figure)

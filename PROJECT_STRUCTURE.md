@@ -40,7 +40,7 @@ PFF/
 ├── Manifest.toml        完整依赖版本锁定；通常不要手工编辑
 ├── STATE.md             当前实现状态、验证结果和限制
 ├── PLAN.md              开发计划与验收标准
-├── 结构.md              本文件：项目地图和阅读导航
+├── PROJECT_STRUCTURE.md              本文件：项目地图和阅读导航
 └── LICENSE              许可证
 ```
 
@@ -165,7 +165,6 @@ data/
 | 改 RLM 标量求根 | `src/rlm/scalar_solver.jl` | `test/runtests.jl` |
 | 改 Cahn–Hilliard | `src/fem/ch_setup.jl`、`ch_assembly.jl` | `src/solvers/rlm_ch.jl`、`scripts/run_ch_rlm.jl` |
 | 改输出、反力或能量诊断 | 对应求解器文件 | `src/utils/utils_fun.jl`、`data/` |
-| 判断功能是否已经完成 | `STATE.md` | `PLAN.md`、`docs/` |
 
 ## 8. 修改代码时必须保持的约束
 

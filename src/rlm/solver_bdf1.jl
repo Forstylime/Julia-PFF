@@ -276,7 +276,9 @@ function solve_rlm_bdf1(problem::RLMProblem)
     cumulative_work = 0.0; cumulative_viscous = 0.0; cumulative_numerical = 0.0
     nsteps = round(Int, config.time.final_time / config.time.dt)
     for step in 1:nsteps
-        time = step * config.time.dt
+        # Use the configured endpoint exactly; repeated floating-point
+        # multiplication can otherwise produce e.g. 1.2000000000000002.
+        time = step == nsteps ? config.time.final_time : step * config.time.dt
         local trial
         try
             trial = compute_rlm_bdf1_trial(problem, state, time)
