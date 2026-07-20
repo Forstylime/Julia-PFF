@@ -5,7 +5,19 @@ using PffSAV
 const PROJECT_ROOT = normpath(joinpath(@__DIR__, ".."))
 const PLOT_DIRECTORY = joinpath(PROJECT_ROOT, "data", "plots")
 const RESULT_DIRECTORY = joinpath(PROJECT_ROOT, "data", "jld2")
-const VTK_DIRECTORY = joinpath(PROJECT_ROOT, "data", "sims", "staggered")
+
+# Set ETA > 0 to run the BDF1 viscous phase-field model.  Keeping ETA == 0
+# reproduces the original quasi-static staggered calculation.
+const ETA = 0.0001
+const N_STEPS = 1000
+const DT = 0.001 # physical BDF1 time step; set TIME_POINTS = nothing to use it
+const TOTAL_TIME = N_STEPS * DT
+const TIME_POINTS = nothing # or e.g. [0.0, 0.02, 0.1, 1.0]
+const MODE_NAME = ETA > 0 ? "staggered_bdf1" : "staggered"
+const VTK_DIRECTORY = joinpath(PROJECT_ROOT, "data", "sims", MODE_NAME)
+
+"""Load factor evaluated at physical time t; replace for a different history."""
+load_history(t) = t / TOTAL_TIME
 
 function plot_results(setup, displacement, force, _elastic_energy, surface_energy)
     direction_sign = sign(setup.final_displacement)
@@ -78,26 +90,44 @@ function main()
         dir = 2,
     )
 
-    displacement, force, elastic_energy, surface_energy = solve_staggered(
+    solver_dt = isnothing(TIME_POINTS) ? DT : nothing
+    result = solve_staggered(
         setup,
         material;
-        n_steps = 100,
+        n_steps = N_STEPS,
         max_iter = 2_000,
-        enforce_irreversibility = true,
+        enforce_irreversibility = false,
+        eta = ETA,
+        dt = solver_dt,
+        total_time = TOTAL_TIME,
+        time_points = TIME_POINTS,
+        load_history = load_history,
+        return_diagnostics = true,
         output_directory = VTK_DIRECTORY,
     )
+    displacement = result.displacements
+    force = result.reaction_forces
+    elastic_energy = result.elastic_energies
+    surface_energy = result.surface_energies
 
     mkpath(PLOT_DIRECTORY)
     mkpath(RESULT_DIRECTORY)
     plot_results(setup, displacement, force, elastic_energy, surface_energy)
 
-    result_path = joinpath(RESULT_DIRECTORY, "staggered_results.jld2")
+    result_path = joinpath(RESULT_DIRECTORY, "$(MODE_NAME)_results.jld2")
     jldsave(
         result_path;
         displacement,
         force,
         elastic_energy,
         surface_energy,
+        physical_time = result.times,
+        diagnostics = result.diagnostics,
+        cumulative_viscous_dissipation = result.cumulative_viscous_dissipation,
+        eta = ETA,
+        dt = solver_dt,
+        total_time = TOTAL_TIME,
+        enforce_irreversibility = true,
     )
     println("Staggered simulation data saved to $result_path")
     return nothing

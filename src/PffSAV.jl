@@ -20,7 +20,7 @@ include("fem/ch_setup.jl")
 include("fem/assembly.jl")
 include("fem/ch_assembly.jl")
 
-# Miehe--RLM-PC--BDF1 (separate from the legacy staggered implementation)
+# Miehe--RLM-PE--BDF1 real-time viscous phase-field fracture
 include("rlm/config.jl")
 include("rlm/miehe2d.jl")
 include("rlm/assembly.jl")
@@ -40,6 +40,7 @@ export
     TensionSetup,
     RLMMaterialConfig,
     RLMMeshConfig,
+    RLMPiecewiseLinearHistory,
     RLMLoadConfig,
     RLMTimeConfig,
     RLMToleranceConfig,
@@ -71,10 +72,14 @@ export
     miehe_response_2d,
     assemble_rlm_nonlinear_forces!,
     rlm_nonlinear_energy,
+    rlm_elastic_split_energies,
     rlm_raw_energy,
     rlm_proxy_energy,
     phase_field_metrics,
+    history_value,
+    update_rlm_external_force!,
     write_rlm_diagnostics,
+    write_rlm_time_history,
     # --- utilities ---
     compute_driving_force!,
     compute_reaction_forces,

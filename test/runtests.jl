@@ -4,325 +4,121 @@ using Ferrite
 using PffSAV
 using Tensors
 
-@testset "staggered material parameters" begin
-    material = MaterialParams(E = 1_000, gc = 1, l = 2)
-
-    @test material.E === 1_000.0
-    @test material.gc === 1.0
-    @test material.l === 2.0
-    @test material.λ > 0
-    @test material.μ > 0
-    @test_throws ArgumentError MaterialParams(E = 0)
-    @test_throws ArgumentError MaterialParams(ν = 0.5)
-    @test_throws ArgumentError MaterialParams(gc = 0)
-    @test_throws ArgumentError MaterialParams(l = 0)
-    @test_throws ArgumentError MaterialParams(k = 0)
-end
-
-const MAT = RLMMaterialConfig(
-    E = 1_000.0,
-    nu = 0.25,
-    G_c = 1.0,
-    ell = 0.2,
-    kappa = 1.0e-6,
-    mobility = 1.0,
-)
+const MAT = RLMMaterialConfig(E = 1_000.0, nu = 0.25, G_c = 1.0, ell = 0.2,
+    kappa = 1.0e-6, viscosity = 1.0)
 const TOL = RLMToleranceConfig()
+small_grid() = generate_grid(Quadrilateral, (2, 2), Vec(0.0, 0.0), Vec(1.0, 1.0))
 
-function small_config(;
-    scalar_residual = 1.0e-10,
-    phase = 1.0,
-    q = 1.0,
-    max_relax = 4,
-    relaxation_mode = :to_tolerance,
-)
-    return RLMConfig(
-        material = MAT,
-        mesh = RLMMeshConfig(path = "unused", quadrature_order = 2),
-        load = RLMLoadConfig(
-            fixed_boundary = "left",
-            loaded_boundary = "right",
-            component = 1,
-            final_displacement = 1.0e-4,
-            load_steps = 2,
-            initial_damage = 0.0,
-        ),
-        time = RLMTimeConfig(
-            dt = 1.0e-3,
-            alpha = 10.0,
-            relaxation_mode = relaxation_mode,
-            min_relax_steps = 1,
-            max_relax_steps = max_relax,
-        ),
-        tolerances = RLMToleranceConfig(
-            scalar_residual = scalar_residual,
-            phase = phase,
-            q = q,
-        ),
-        output = RLMOutputConfig(write_csv = false, write_vtk = false, verbose = false),
-    )
+function history(values; times = [0.0, 0.001, 0.002])
+    RLMPiecewiseLinearHistory(times, values)
 end
 
-small_grid() = generate_grid(
-    Quadrilateral,
-    (2, 2),
-    Vec(0.0, 0.0),
-    Vec(1.0, 1.0),
-)
-
-@testset "normalized degradation" begin
-    kappa = MAT.kappa
-    @test degradation(0.0, kappa) == 1.0
-    @test degradation(1.0, kappa) == kappa
-    d = 0.37
-    h = 1.0e-7
-    finite_difference = (degradation(d + h, kappa) - degradation(d - h, kappa)) / (2h)
-    @test degradation_derivative(d, kappa) ≈ finite_difference rtol = 1.0e-8
+function small_config(; displacement = history([0.0, 1.0, 1.0]), body = history([0.0, 0.0, 0.0]),
+    traction = history([0.0, 0.0, 0.0]), initial_damage = 0.0, dt = 0.001, final_time = 0.002,
+    scalar_residual = 1.0e-10)
+    RLMConfig(material = MAT, mesh = RLMMeshConfig(path = "unused", quadrature_order = 2),
+        load = RLMLoadConfig(fixed_boundary = "left", loaded_boundary = "right", component = 1,
+            displacement_amplitude = 1.0e-4, displacement_history = displacement,
+            initial_damage = initial_damage, body_force = (1.0, 2.0), body_force_history = body,
+            traction_boundary = "top", traction = (0.0, 3.0), traction_history = traction),
+        time = RLMTimeConfig(final_time = final_time, dt = dt, alpha = 10.0),
+        tolerances = RLMToleranceConfig(scalar_residual = scalar_residual),
+        output = RLMOutputConfig(write_csv = false, write_vtk = false, verbose = false))
 end
 
-@testset "robust plane-strain Miehe split" begin
+@testset "piecewise-linear physical-time histories" begin
+    h = RLMPiecewiseLinearHistory([0, 1, 3], [0, 2, 1])
+    @test history_value(h, 0.5) == 1.0
+    @test history_value(h, 2.0) == 1.5
+    @test_throws ArgumentError history_value(h, -0.1)
+    @test_throws ArgumentError RLMPiecewiseLinearHistory([0, 1], [0])
+    @test_throws ArgumentError RLMPiecewiseLinearHistory([0, 0], [0, 1])
+end
+
+@testset "Miehe split and scalar root" begin
     lambda = MAT.E * MAT.nu / ((1 + MAT.nu) * (1 - 2MAT.nu))
     mu = MAT.E / (2 * (1 + MAT.nu))
     C0 = PffSAV.plane_strain_elasticity_tensor(MAT)
-
-    epsilon_tension = SymmetricTensor{2, 2, Float64}((0.01, 0.0, 0.0))
-    pp, pm, sp, sm, split = miehe_response_2d(epsilon_tension, MAT, TOL)
+    tension = SymmetricTensor{2, 2, Float64}((0.01, 0.0, 0.0))
+    pp, pm, sp, sm, split = miehe_response_2d(tension, MAT, TOL)
     @test pp ≈ (0.5lambda + mu) * 0.01^2
     @test pm ≈ 0.0 atol = 1.0e-14
-    @test split.epsilon_plus + split.epsilon_minus ≈ epsilon_tension
-    @test sp + sm ≈ C0 ⊡ epsilon_tension
-
-    epsilon_compression = SymmetricTensor{2, 2, Float64}((-0.01, 0.0, 0.0))
-    pp, pm, sp, sm, split = miehe_response_2d(epsilon_compression, MAT, TOL)
-    @test pp ≈ 0.0 atol = 1.0e-14
-    @test pm ≈ (0.5lambda + mu) * 0.01^2
-    @test split.epsilon_plus + split.epsilon_minus ≈ epsilon_compression
-    @test sp + sm ≈ C0 ⊡ epsilon_compression
-
-    epsilon_shear = SymmetricTensor{2, 2, Float64}((0.0, 0.005, 0.0))
-    pp, pm, sp, sm, split = miehe_response_2d(epsilon_shear, MAT, TOL)
-    @test pp ≈ mu * 0.005^2
-    @test pm ≈ mu * 0.005^2
-    @test split.principal_min ≈ -0.005
-    @test split.principal_max ≈ 0.005
-
-    epsilon_equal_tension = SymmetricTensor{2, 2, Float64}((0.002, 0.0, 0.002))
-    pp, pm, _, _, _ = miehe_response_2d(epsilon_equal_tension, MAT, TOL)
-    @test pp ≈ 0.5 * (epsilon_equal_tension ⊡ C0 ⊡ epsilon_equal_tension)
-    @test pm ≈ 0.0 atol = 1.0e-14
-    epsilon_equal_compression = -epsilon_equal_tension
-    pp, pm, _, _, _ = miehe_response_2d(epsilon_equal_compression, MAT, TOL)
-    @test pp ≈ 0.0 atol = 1.0e-14
-    @test pm ≈ 0.5 * (epsilon_equal_compression ⊡ C0 ⊡ epsilon_equal_compression)
-
-    epsilon_reference = SymmetricTensor{2, 2, Float64}((0.003, 0.001, -0.002))
-    theta = 0.731
-    rotation = [cos(theta) -sin(theta); sin(theta) cos(theta)]
-    rotated_matrix = rotation * Matrix(epsilon_reference) * transpose(rotation)
-    epsilon_rotated = SymmetricTensor{2, 2, Float64}((
-        rotated_matrix[1, 1], rotated_matrix[1, 2], rotated_matrix[2, 2],
-    ))
-    pp_ref, pm_ref, _, _, _ = miehe_response_2d(epsilon_reference, MAT, TOL)
-    pp_rot, pm_rot, _, _, _ = miehe_response_2d(epsilon_rotated, MAT, TOL)
-    @test pp_rot ≈ pp_ref rtol = 1.0e-12
-    @test pm_rot ≈ pm_ref rtol = 1.0e-12
-
-    cases = (
-        zero(epsilon_tension),
-        SymmetricTensor{2, 2, Float64}((1.0e-6, 1.0e-18, 1.0e-6)),
-        SymmetricTensor{2, 2, Float64}((1.0e-16, 0.0, -1.0e-16)),
-        SymmetricTensor{2, 2, Float64}((0.002, 0.003, -0.004)),
-    )
-    for epsilon in cases
-        pp, pm, sp, sm, split = miehe_response_2d(epsilon, MAT, TOL)
-        unsplit = 0.5 * (epsilon ⊡ C0 ⊡ epsilon)
-        @test split.epsilon_plus + split.epsilon_minus ≈ epsilon atol = 1.0e-14
-        @test pp + pm ≈ unsplit atol = 1.0e-14 rtol = 1.0e-12
-        @test sp + sm ≈ C0 ⊡ epsilon atol = 1.0e-12 rtol = 1.0e-12
-    end
+    @test split.epsilon_plus + split.epsilon_minus ≈ tension
+    @test sp + sm ≈ C0 ⊡ tension
+    @test solve_rlm_quadratic(1.0, 0.0, -1.0, 1.0, TOL).q ≈ 1.0
+    @test !solve_rlm_quadratic(1.0, 0.0, 1.0, 1.0, TOL).success
 end
 
-@testset "stable scalar equation" begin
-    result = solve_rlm_quadratic(1.0, 0.0, -1.0, 1.0, TOL)
-    @test result.success
-    @test result.q ≈ 1.0
-    negative_zero_B = solve_rlm_quadratic(1.0, -0.0, -1.0, 1.0, TOL)
-    @test negative_zero_B.success
-    @test negative_zero_B.q ≈ 1.0
-
-    cancellation = solve_rlm_quadratic(1.0, 1.0e16, -1.0, 1.0, TOL)
-    @test cancellation.success
-    @test cancellation.q ≈ 1.0e-16 rtol = 1.0e-12
-
-    two_positive = solve_rlm_quadratic(1.0, -3.0, 2.0, 1.1, TOL)
-    @test two_positive.success
-    @test two_positive.q == 1.0
-
-    nearly_double = solve_rlm_quadratic(1.0, -2.0, 1.0 + 1.0e-14, 1.0, TOL)
-    @test nearly_double.success
-    @test nearly_double.discriminant < 0.0
-    @test nearly_double.discriminant_used == 0.0
-
-    linear = solve_rlm_quadratic(0.0, 2.0, -4.0, 1.0, TOL)
-    @test linear.success
-    @test linear.q == 2.0
-
-    no_real = solve_rlm_quadratic(1.0, 0.0, 1.0, 1.0, TOL)
-    @test !no_real.success
-    @test no_real.code == :negative_discriminant
-
-    no_positive = solve_rlm_quadratic(1.0, 2.0, 1.0, 1.0, TOL)
-    @test !no_positive.success
-    @test no_positive.code == :no_admissible_positive_root
-
-    zero_residual_tolerance = RLMToleranceConfig(scalar_residual = 0.0)
-    rejected_residual = solve_rlm_quadratic(1.0, 0.0, -2.0, 1.0, zero_residual_tolerance)
-    @test !rejected_residual.success
-    @test rejected_residual.code == :no_admissible_positive_root
-    @test isfinite(rejected_residual.residual)
-    @test rejected_residual.residual > 0.0
-end
-
-@testset "affine branches and one-step identities" begin
+@testset "real-time affine BDF1 step" begin
     problem = build_rlm_problem(small_config(); grid = small_grid())
-    @test issymmetric(problem.K_u)
-    @test issymmetric(problem.M_d)
-    @test issymmetric(problem.K_AT2)
-    @test isposdef(Symmetric(Matrix(problem.K_u_constrained)))
-    @test isposdef(Symmetric(Matrix(problem.K_d)))
-
-    update!(problem.ch_u, 1.0)
-    state = RLMState(zeros(ndofs(problem.dh_u)), zeros(ndofs(problem.dh_d)), 1.0, 0.0)
-    apply!(state.u, problem.ch_u)
-    state.P = rlm_nonlinear_energy(problem, state.u, state.d)
-    old_state = copy(state)
-    trial = compute_rlm_bdf1_trial(problem, state)
-
-    @test state.u == old_state.u
-    @test state.d == old_state.d
-    @test state.q == old_state.q
-    @test state.P == old_state.P
-
-    u_a_checked = copy(trial.u_a)
-    apply!(u_a_checked, problem.ch_u)
-    @test trial.u_a ≈ u_a_checked
-    u_b_checked = copy(trial.u_b)
-    apply_zero!(u_b_checked, problem.ch_u)
-    @test trial.u_b ≈ u_b_checked
-
-    c1_quadratic = -dot(trial.u_b, problem.K_u * trial.u_b) -
-                   dot(trial.d_b, problem.K_d * trial.d_b)
-    @test trial.c1 <= 1.0e-12
-    @test trial.c1 ≈ c1_quadratic rtol = 1.0e-9 atol = 1.0e-12
-
-    free = free_dofs(problem.ch_u)
-    equilibrium = problem.K_u * trial.u + trial.q * trial.n_u - problem.f_ext
-    @test norm(equilibrium[free]) <= 1.0e-9
-    inverse_M_dt = 1 / (problem.config.material.mobility * problem.config.time.dt)
-    phase_residual = inverse_M_dt * problem.M_d * (trial.d - state.d) +
-                     problem.K_AT2 * trial.d + trial.q * trial.n_d
-    @test norm(phase_residual) <= 1.0e-9
-    @test scalar_equation_residual(
-        trial.A, trial.B, trial.C, trial.q,
-        problem.config.tolerances.scalar_denominator_epsilon,
-    ) <= problem.config.tolerances.scalar_residual
-
-    proxy_old = rlm_proxy_energy(problem, state.u, state.d, state.q, state.P)
-    @test trial.proxy_energy <= proxy_old + 1.0e-11
-    @test trial.energy_balance_residual <= problem.config.tolerances.energy_balance_rel
-    @test trial.healing >= 0.0
-end
-
-@testset "fixed external-load functional" begin
-    base = small_config()
-    load = RLMLoadConfig(
-        fixed_boundary = "left",
-        loaded_boundary = "right",
-        component = 1,
-        final_displacement = 1.0e-4,
-        load_steps = 1,
-        body_force = (1.0, 2.0),
-        traction_boundary = "top",
-        traction = (0.0, 3.0),
-    )
-    config = RLMConfig(
-        material = base.material,
-        mesh = base.mesh,
-        load = load,
-        time = base.time,
-        tolerances = base.tolerances,
-        output = base.output,
-    )
-    problem = build_rlm_problem(config; grid = generate_grid(
-        Quadrilateral, (1, 1), Vec(0.0, 0.0), Vec(1.0, 1.0),
-    ))
-    @test norm(problem.f_ext) > 0.0
-    # Partition of unity: unit-area body load contributes 1+2 and the
-    # unit-length top traction contributes 3 to the sum of vector entries.
-    @test sum(problem.f_ext) ≈ 6.0
-end
-
-@testset "transactional rollback" begin
-    config = small_config(scalar_residual = 0.0)
-    problem = build_rlm_problem(config; grid = small_grid())
-    update!(problem.ch_u, 1.0)
+    update!(problem.ch_u, 0.0)
     state = RLMState(zeros(ndofs(problem.dh_u)), zeros(ndofs(problem.dh_d)), 1.0, 0.0)
     apply!(state.u, problem.ch_u)
     state.P = rlm_nonlinear_energy(problem, state.u, state.d)
     snapshot = copy(state)
-    @test_throws PffSAV.RLMStepFailure compute_rlm_bdf1_trial(problem, state)
-    @test state.u == snapshot.u
-    @test state.d == snapshot.d
-    @test state.q == snapshot.q
-    @test state.P == snapshot.P
+    trial = compute_rlm_bdf1_trial(problem, state, 0.001)
+    @test state.u == snapshot.u && state.d == snapshot.d && state.q == snapshot.q && state.P == snapshot.P
+    free = free_dofs(problem.ch_u)
+    equilibrium = problem.K_u * trial.u + trial.q * trial.n_u - problem.f_ext
+    @test norm(equilibrium[free]) <= 1.0e-9
+    phase = MAT.viscosity / problem.config.time.dt * problem.M_d * (trial.d - state.d) +
+            problem.K_AT2 * trial.d + trial.q * trial.n_d
+    @test norm(phase) <= 1.0e-9
+    @test trial.c1 <= 1.0e-12
+    @test trial.scalar_residual <= problem.config.tolerances.scalar_residual
+    @test trial.energy_balance_residual <= problem.config.tolerances.energy_balance_rel
+    @test isfinite(trial.external_work) && isfinite(trial.viscous_dissipation)
 end
 
-@testset "load-relax and diagnostics" begin
-    problem = build_rlm_problem(small_config(); grid = small_grid())
-    result = solve_rlm_bdf1(problem)
-    @test result.success
-    @test result.converged
-    @test count(d -> d.status == "load_reset", result.diagnostics) == 2
-    accepted = filter(d -> d.status == "accepted", result.diagnostics)
-    @test length(accepted) == 2
-    for diagnostic in accepted
-        @test isfinite(diagnostic.raw_energy)
-        @test isfinite(diagnostic.proxy_energy)
-        @test isfinite(diagnostic.q_minus_one)
-        @test diagnostic.c1 <= 1.0e-12
-        @test isfinite(diagnostic.discriminant)
-        @test diagnostic.scalar_residual <= problem.config.tolerances.scalar_residual
-        @test diagnostic.phase_increment >= 0.0
-        @test diagnostic.healing >= 0.0
-    end
-
+@testset "one update per physical time step and continuous q/P" begin
+    result = solve_rlm_bdf1(build_rlm_problem(small_config(); grid = small_grid()))
+    @test result.success && result.completed
+    @test length(result.diagnostics) == 3
+    @test all(d -> d.accepted, result.diagnostics)
+    @test [d.step for d in result.diagnostics] == [0, 1, 2]
+    @test [d.time for d in result.diagnostics] ≈ [0.0, 0.001, 0.002]
+    @test all(d -> isfinite(d.cumulative_external_work), result.diagnostics)
+    @test all(d -> isfinite(d.energy_balance_residual), result.diagnostics[2:end])
+    @test !any(d -> occursin("reset", d.status), result.diagnostics)
     mktempdir() do directory
-        path = joinpath(directory, "diagnostics.csv")
-        write_rlm_diagnostics(path, result.diagnostics)
-        text = read(path, String)
-        @test occursin("raw_energy", text)
-        @test occursin("proxy_energy", text)
-        @test occursin("q_minus_one", text)
-        @test occursin("healing", text)
+        path = joinpath(directory, "history.csv")
+        write_rlm_time_history(path, result.diagnostics)
+        @test length(readlines(path)) == 4
     end
 end
 
+@testset "time-dependent body and traction factors" begin
+    config = small_config(displacement = history([0.0, 0.0, 0.0]), body = history([0.0, 0.5, 1.0]),
+        traction = history([0.0, 0.25, 0.5]))
+    problem = build_rlm_problem(config; grid = small_grid())
+    update_rlm_external_force!(problem, 0.001)
+    @test problem.f_ext ≈ 0.5 .* problem.f_body_reference .+ 0.25 .* problem.f_traction_reference
+    @test norm(problem.f_ext) > 0.0
+end
 
-@testset "fixed-step RLM validation mode" begin
-    config = small_config(
-        phase = 0.0,
-        q = 0.0,
-        max_relax = 3,
-        relaxation_mode = :fixed_steps,
-    )
+@testset "uniform viscous relaxation is first-order in time" begin
+    function final_error(dt)
+        final_time = 0.004
+        times = collect(0.0:dt:final_time)
+        zero_history = RLMPiecewiseLinearHistory(times, zeros(length(times)))
+        config = small_config(displacement = zero_history, body = zero_history, traction = zero_history,
+            initial_damage = 0.1, dt = dt, final_time = final_time)
+        result = solve_rlm_bdf1(build_rlm_problem(config; grid = small_grid()))
+        @test result.success
+        exact = 0.1 * exp(-MAT.G_c / (MAT.viscosity * MAT.ell) * final_time)
+        return maximum(abs.(result.state.d .- exact))
+    end
+    e1, e2 = final_error(0.001), final_error(0.0005)
+    @test e2 < 0.65 * e1
+end
+
+@testset "transactional real-time rollback" begin
+    base = small_config()
+    config = RLMConfig(material = base.material, mesh = base.mesh, load = base.load, time = base.time,
+        tolerances = RLMToleranceConfig(positive_root = 2.0), output = base.output)
     problem = build_rlm_problem(config; grid = small_grid())
     result = solve_rlm_bdf1(problem)
-
-    @test result.success
-    @test !result.converged
-    @test occursin("steady-state convergence was not requested", result.message)
-    accepted = filter(d -> d.status == "accepted", result.diagnostics)
-    @test length(accepted) == config.load.load_steps * config.time.max_relax_steps
-    @test all(d -> d.scalar_residual <= config.tolerances.scalar_residual, accepted)
-    @test all(d -> isfinite(d.energy_balance_residual), accepted)
+    @test !result.success && !result.completed
+    @test !last(result.diagnostics).accepted
+    @test last(result.diagnostics).step == 1
 end

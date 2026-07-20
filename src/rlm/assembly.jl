@@ -14,9 +14,30 @@ struct RLMProblem{G,DHU,DHD,CHU,CVU,CVD,FVU,C,RHS,FU,FD}
     K_d::SparseMatrixCSC{Float64, Int}
     K_u_constrained::SparseMatrixCSC{Float64, Int}
     f_ext::Vector{Float64}
+    f_body_reference::Vector{Float64}
+    f_traction_reference::Vector{Float64}
+    loaded_component_dofs::Vector{Int}
     rhs_data_u::RHS
     factor_u::FU
     factor_d::FD
+end
+
+function _boundary_component_dofs(dh_u, grid, boundary::String, component::Int)
+    facets = _require_facetset(grid, boundary)
+    scalar_interpolation = Lagrange{RefQuadrilateral, 1}()
+    local_facet_nodes = Ferrite.dirichlet_facetdof_indices(scalar_interpolation)
+    dofs = Int[]
+    for (cell_index, facet_index) in facets
+        cell_dofs = celldofs(dh_u, cell_index)
+        for local_node in local_facet_nodes[facet_index]
+            push!(dofs, cell_dofs[2 * (local_node - 1) + component])
+        end
+    end
+    sort!(unique!(dofs))
+    isempty(dofs) && throw(ArgumentError(
+        "loaded boundary '$boundary' has no component-$component displacement dofs",
+    ))
+    return dofs
 end
 
 function _require_facetset(grid, name::String)
@@ -55,12 +76,12 @@ function _create_rlm_constraints(dh_u, grid, load::RLMLoadConfig)
     fixed = _require_facetset(grid, load.fixed_boundary)
     loaded = _require_facetset(grid, load.loaded_boundary)
     ch_u = ConstraintHandler(dh_u)
-    final_displacement = load.final_displacement
+    displacement_amplitude = load.displacement_amplitude
     fixed_condition = Dirichlet(:u, fixed, (x, t) -> Vec(0.0, 0.0), [1, 2])
     loaded_condition = Dirichlet(
         :u,
         loaded,
-        (x, load_fraction) -> load_fraction * final_displacement,
+        (x, time) -> displacement_amplitude * history_value(load.displacement_history, time),
         load.component,
     )
     # Ferrite resolves a shared corner degree of freedom with the last-added
@@ -139,16 +160,15 @@ function _assemble_constant_matrices!(
     return nothing
 end
 
-function _assemble_external_force!(
-    f_ext,
+function _assemble_body_force!(
+    f_body,
     dh_u,
     grid,
     cellvalues_u,
-    facetvalues_u,
-    load::RLMLoadConfig,
+    body_force::NTuple{2, Float64},
 )
-    fill!(f_ext, 0.0)
-    body = Vec(load.body_force)
+    fill!(f_body, 0.0)
+    body = Vec(body_force)
     if body != zero(body)
         n_u = getnbasefunctions(cellvalues_u)
         fe = zeros(n_u)
@@ -162,10 +182,21 @@ function _assemble_external_force!(
                     fe[i] += (body ⋅ test_value) * dOmega
                 end
             end
-            assemble!(f_ext, celldofs(cell), fe)
+            assemble!(f_body, celldofs(cell), fe)
         end
     end
 
+    return f_body
+end
+
+function _assemble_traction_force!(
+    f_traction,
+    dh_u,
+    grid,
+    facetvalues_u,
+    load::RLMLoadConfig,
+)
+    fill!(f_traction, 0.0)
     if load.traction_boundary !== nothing
         facets = _require_facetset(grid, load.traction_boundary)
         traction = Vec(load.traction)
@@ -181,12 +212,22 @@ function _assemble_external_force!(
                     fe[i] += (traction ⋅ test_value) * dGamma
                 end
             end
-            assemble!(f_ext, celldofs(facet), fe)
+            assemble!(f_traction, celldofs(facet), fe)
         end
     elseif load.traction != (0.0, 0.0)
         throw(ArgumentError("a nonzero traction requires load.traction_boundary"))
     end
-    return f_ext
+    return f_traction
+end
+
+"""Update physical-time external force coefficients without reassembling FEM integrals."""
+function update_rlm_external_force!(problem::RLMProblem, time::Real)
+    load = problem.config.load
+    body_factor = history_value(load.body_force_history, time)
+    traction_factor = history_value(load.traction_history, time)
+    problem.f_ext .= body_factor .* problem.f_body_reference .+
+                     traction_factor .* problem.f_traction_reference
+    return problem.f_ext
 end
 
 """
@@ -230,14 +271,22 @@ function build_rlm_problem(config::RLMConfig; grid = nothing)
         config.material,
     )
 
-    inverse_M_dt = 1.0 / (config.material.mobility * config.time.dt)
-    K_d = K_AT2 + inverse_M_dt * M_d
+    viscosity_over_dt = config.material.viscosity / config.time.dt
+    K_d = K_AT2 + viscosity_over_dt * M_d
     f_ext = zeros(ndofs(dh_u))
-    _assemble_external_force!(
-        f_ext,
+    f_body_reference = zeros(ndofs(dh_u))
+    f_traction_reference = zeros(ndofs(dh_u))
+    _assemble_body_force!(
+        f_body_reference,
         dh_u,
         grid,
         cellvalues_u,
+        config.load.body_force,
+    )
+    _assemble_traction_force!(
+        f_traction_reference,
+        dh_u,
+        grid,
         facetvalues_u,
         config.load,
     )
@@ -247,6 +296,12 @@ function build_rlm_problem(config::RLMConfig; grid = nothing)
     apply!(K_u_constrained, ch_u)
     factor_u = cholesky(Symmetric(K_u_constrained))
     factor_d = cholesky(Symmetric(K_d))
+    loaded_component_dofs = _boundary_component_dofs(
+        dh_u,
+        grid,
+        config.load.loaded_boundary,
+        config.load.component,
+    )
 
     return RLMProblem(
         config,
@@ -264,6 +319,9 @@ function build_rlm_problem(config::RLMConfig; grid = nothing)
         K_d,
         K_u_constrained,
         f_ext,
+        f_body_reference,
+        f_traction_reference,
+        loaded_component_dofs,
         rhs_data_u,
         factor_u,
         factor_d,
@@ -287,14 +345,22 @@ function assemble_rlm_nonlinear_forces!(
     n_base_d = getnbasefunctions(cv_d)
     f_u = zeros(n_base_u)
     f_d = zeros(n_base_d)
+    u_local = zeros(n_base_u)
+    d_local = zeros(n_base_d)
 
     for (cell_u, cell_d) in zip(CellIterator(problem.dh_u), CellIterator(problem.dh_d))
         reinit!(cv_u, cell_u)
         reinit!(cv_d, cell_d)
         fill!(f_u, 0.0)
         fill!(f_d, 0.0)
-        u_local = u[celldofs(cell_u)]
-        d_local = d[celldofs(cell_d)]
+        dofs_u = celldofs(cell_u)
+        dofs_d = celldofs(cell_d)
+        @inbounds for i in eachindex(u_local)
+            u_local[i] = u[dofs_u[i]]
+        end
+        @inbounds for i in eachindex(d_local)
+            d_local[i] = d[dofs_d[i]]
+        end
 
         for qp in 1:getnquadpoints(cv_u)
             dOmega = getdetJdV(cv_u, qp)
@@ -330,11 +396,19 @@ function rlm_nonlinear_energy(
     cv_d = problem.cellvalues_d
     material = problem.config.material
     tolerances = problem.config.tolerances
+    u_local = zeros(getnbasefunctions(cv_u))
+    d_local = zeros(getnbasefunctions(cv_d))
     for (cell_u, cell_d) in zip(CellIterator(problem.dh_u), CellIterator(problem.dh_d))
         reinit!(cv_u, cell_u)
         reinit!(cv_d, cell_d)
-        u_local = u[celldofs(cell_u)]
-        d_local = d[celldofs(cell_d)]
+        dofs_u = celldofs(cell_u)
+        dofs_d = celldofs(cell_d)
+        @inbounds for i in eachindex(u_local)
+            u_local[i] = u[dofs_u[i]]
+        end
+        @inbounds for i in eachindex(d_local)
+            d_local[i] = d[dofs_d[i]]
+        end
         for qp in 1:getnquadpoints(cv_u)
             strain = function_symmetric_gradient(cv_u, qp, u_local)
             damage = function_value(cv_d, qp, d_local)
@@ -344,6 +418,35 @@ function rlm_nonlinear_energy(
         end
     end
     return energy
+end
+
+"""Return degraded positive and undegraded negative elastic energies by quadrature."""
+function rlm_elastic_split_energies(problem::RLMProblem, u::Vector{Float64}, d::Vector{Float64})
+    positive = 0.0
+    negative = 0.0
+    cv_u, cv_d = problem.cellvalues_u, problem.cellvalues_d
+    material, tolerances = problem.config.material, problem.config.tolerances
+    u_local = zeros(getnbasefunctions(cv_u))
+    d_local = zeros(getnbasefunctions(cv_d))
+    for (cell_u, cell_d) in zip(CellIterator(problem.dh_u), CellIterator(problem.dh_d))
+        reinit!(cv_u, cell_u); reinit!(cv_d, cell_d)
+        dofs_u, dofs_d = celldofs(cell_u), celldofs(cell_d)
+        @inbounds for i in eachindex(u_local)
+            u_local[i] = u[dofs_u[i]]
+        end
+        @inbounds for i in eachindex(d_local)
+            d_local[i] = d[dofs_d[i]]
+        end
+        for qp in 1:getnquadpoints(cv_u)
+            strain = function_symmetric_gradient(cv_u, qp, u_local)
+            damage = function_value(cv_d, qp, d_local)
+            psi_plus, psi_minus, _, _, _ = miehe_response_2d(strain, material, tolerances)
+            dOmega = getdetJdV(cv_u, qp)
+            positive += degradation(damage, material.kappa) * psi_plus * dOmega
+            negative += psi_minus * dOmega
+        end
+    end
+    return positive, negative
 end
 
 @inline function rlm_quadratic_energy(problem::RLMProblem, u, d)
@@ -366,6 +469,8 @@ function phase_field_metrics(problem::RLMProblem, d_new, d_old)
     increment_squared = 0.0
     healing_squared = 0.0
     norm_new_squared = 0.0
+    d_new_local = zeros(getnbasefunctions(cv_d))
+    d_old_local = similar(d_new_local)
     # Q1 values are convex combinations of nodal values on the reference cell,
     # so nodal extrema report the discrete field bounds more faithfully than
     # sampling only the interior Gauss points.
@@ -373,8 +478,11 @@ function phase_field_metrics(problem::RLMProblem, d_new, d_old)
     max_damage = maximum(d_new)
     for cell in CellIterator(problem.dh_d)
         reinit!(cv_d, cell)
-        d_new_local = d_new[celldofs(cell)]
-        d_old_local = d_old[celldofs(cell)]
+        dofs = celldofs(cell)
+        @inbounds for i in eachindex(d_new_local)
+            d_new_local[i] = d_new[dofs[i]]
+            d_old_local[i] = d_old[dofs[i]]
+        end
         for qp in 1:getnquadpoints(cv_d)
             dOmega = getdetJdV(cv_d, qp)
             damage_new = function_value(cv_d, qp, d_new_local)

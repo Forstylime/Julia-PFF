@@ -116,10 +116,10 @@ function solve_rlm_ch(
         
         # Calculate relaxed energy (simplified calculation for tracking)
         # Note: True tracking requires assembling the physical energy. Here we use C2 for validation.
-        push!(energies, q_np1)
+        push!(energies, q_np1-1)
         
         if step % 10 == 0 || step == n_steps
-            println("Step $step / $n_steps | q: $(round(q_np1, digits=6))")
+            println("Step $step / $n_steps | q-1: $(round(q_np1-1, digits=9))")
             VTKGridFile(joinpath(outdir, "ch_step_$step"), dh) do vtk
                 write_solution(vtk, dh, U_np1)
             end

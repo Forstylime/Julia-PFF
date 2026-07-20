@@ -75,15 +75,27 @@ function assemble_u!(
 end
 
 """
-    assemble_d!(K, F, dh_d, H, mat, cv_d)
+    assemble_d!(K, F, dh_d, H, mat, cv_d; eta=0, dt=1, d_old=nothing)
 
 组装相场 d 的线性方程组 K*d = F
+
+When `eta > 0`, add the BDF1 viscous term
+`eta / dt * (d^{n+1} - d_old, w)`.  `d_old` is deliberately a separate
+argument: callers must pass the accepted state from the preceding physical
+time step, rather than the previous staggered iterate.
 """
 function assemble_d!(
     K::SparseMatrixCSC, F::Vector{Float64}, 
     dh_d::DofHandler, H::Vector{Float64}, 
-    mat::MaterialParams, cv_d::CellValues
+    mat::MaterialParams, cv_d::CellValues;
+    eta::Real = 0.0,
+    dt::Real = 1.0,
+    d_old::Union{Nothing,AbstractVector} = nothing,
 )
+    eta >= 0 || throw(ArgumentError("eta must be non-negative"))
+    dt > 0 || throw(ArgumentError("dt must be positive"))
+    eta == 0 || !isnothing(d_old) ||
+        throw(ArgumentError("d_old is required when eta > 0"))
     assembler = start_assemble(K, F)
     n_basefuncs_d = getnbasefunctions(cv_d)
     
@@ -94,6 +106,7 @@ function assemble_d!(
     for cell in CellIterator(dh_d)
         reinit!(cv_d, cell)
         
+        d_old_loc = isnothing(d_old) ? nothing : d_old[celldofs(cell)]
         fill!(Ke, 0.0)
         fill!(Fe, 0.0)
         
@@ -104,6 +117,7 @@ function assemble_d!(
             # 将弱形式 (17) 重排为 A*d = B 的形式
             coef_d    = mat.gc / mat.l + 2.0 * H_q
             coef_grad = mat.gc * mat.l
+            viscous_coefficient = eta / dt
             
             for i in 1:n_basefuncs_d
                 δd  = shape_value(cv_d, q_point, i)
@@ -111,13 +125,20 @@ function assemble_d!(
                 
                 # 右端项载荷向量
                 Fe[i] += (2.0 * H_q * δd) * dΩ
+                if !isnothing(d_old_loc)
+                    d_old_q = function_value(cv_d, q_point, d_old_loc)
+                    Fe[i] += viscous_coefficient * d_old_q * δd * dΩ
+                end
                 
                 for j in 1:n_basefuncs_d
                     Δd  = shape_value(cv_d, q_point, j)
                     ∇Δd = shape_gradient(cv_d, q_point, j)
                     
                     # 刚度矩阵
-                    Ke[i, j] += (coef_d * δd * Δd + coef_grad * (∇δd ⋅ ∇Δd)) * dΩ
+                    Ke[i, j] += (
+                        (coef_d + viscous_coefficient) * δd * Δd +
+                        coef_grad * (∇δd ⋅ ∇Δd)
+                    ) * dΩ
                 end
             end
             qp_count += 1
