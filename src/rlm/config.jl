@@ -71,6 +71,18 @@ Base.@kwdef struct RLMTimeConfig
     alpha::Float64 = 1.0
 end
 
+"""Controls for the directional quadratic-majorant (QM) scalar closure."""
+Base.@kwdef struct RLMQMConfig
+    q_min::Float64 = 0.0
+    q_max::Float64 = 2.0
+    finite_difference_step::Float64 = 1.0e-3
+    initial_curvature::Float64 = 0.0
+    curvature_growth::Float64 = 2.0
+    max_backtracks::Int = 8
+    majorant_abs::Float64 = 1.0e-10
+    majorant_rel::Float64 = 1.0e-8
+end
+
 """All floating-point decisions made by the first-stage RLM implementation."""
 Base.@kwdef struct RLMToleranceConfig
     principal_zero_abs::Float64 = 1.0e-14
@@ -102,14 +114,17 @@ Base.@kwdef struct RLMOutputConfig
     write_vtk::Bool = true
     vtk_every_time_step::Int = 1
     verbose::Bool = true
+    show_progress::Bool = true
+    progress_refresh_seconds::Float64 = 0.25
 end
 
-"""Complete, explicit configuration for Miehe--RLM-PE--BDF1."""
+"""Complete, explicit configuration for Miehe--RLM--BDF1-QM."""
 Base.@kwdef struct RLMConfig
     material::RLMMaterialConfig = RLMMaterialConfig()
     mesh::RLMMeshConfig = RLMMeshConfig()
     load::RLMLoadConfig = RLMLoadConfig()
     time::RLMTimeConfig = RLMTimeConfig()
+    qm::RLMQMConfig = RLMQMConfig()
     tolerances::RLMToleranceConfig = RLMToleranceConfig()
     output::RLMOutputConfig = RLMOutputConfig()
 end
@@ -119,10 +134,9 @@ mutable struct RLMState
     u::Vector{Float64}
     d::Vector{Float64}
     q::Float64
-    P::Float64
 end
 
-Base.copy(state::RLMState) = RLMState(copy(state.u), copy(state.d), state.q, state.P)
+Base.copy(state::RLMState) = RLMState(copy(state.u), copy(state.d), state.q)
 
 """One row of the mandatory RLM diagnostics."""
 Base.@kwdef mutable struct RLMDiagnostic
@@ -140,15 +154,16 @@ Base.@kwdef mutable struct RLMDiagnostic
     status::String
     raw_energy::Float64 = NaN
     internal_energy::Float64 = NaN
-    proxy_energy::Float64 = NaN
+    relaxed_internal_energy::Float64 = NaN
     elastic_energy::Float64 = NaN
     positive_elastic_energy::Float64 = NaN
     negative_elastic_energy::Float64 = NaN
     fracture_energy::Float64 = NaN
     nonlinear_energy::Float64 = NaN
-    predicted_energy::Float64 = NaN
-    prediction_gap::Float64 = NaN
-    proxy_gap::Float64 = NaN
+    phi_star::Float64 = NaN
+    g_star::Float64 = NaN
+    curvature::Float64 = NaN
+    majorant_margin::Float64 = NaN
 
     q::Float64 = NaN
     q_minus_one::Float64 = NaN
@@ -160,7 +175,8 @@ Base.@kwdef mutable struct RLMDiagnostic
     discriminant::Float64 = NaN
     discriminant_used::Float64 = NaN
     scalar_residual::Float64 = NaN
-    reaction_force::Float64 = NaN
+    reaction_rlm::Float64 = NaN
+    reaction_phys::Float64 = NaN
     external_work::Float64 = NaN
     cumulative_external_work::Float64 = NaN
     viscous_dissipation::Float64 = NaN
@@ -174,7 +190,7 @@ Base.@kwdef mutable struct RLMDiagnostic
     healing::Float64 = NaN
     min_d::Float64 = NaN
     max_d::Float64 = NaN
-    energy_balance_residual::Float64 = NaN
+    energy_inequality_violation::Float64 = NaN
 end
 
 """Transactional failure: no state has been committed when this exception is made."""
@@ -200,7 +216,10 @@ struct RLMTrial
     d::Vector{Float64}
     n_u::Vector{Float64}
     n_d::Vector{Float64}
-    P::Float64
+    phi_star::Float64
+    g_star::Float64
+    curvature::Float64
+    majorant_margin::Float64
     c0::Float64
     c1::Float64
     A::Float64
@@ -211,18 +230,19 @@ struct RLMTrial
     q::Float64
     scalar_residual::Float64
     raw_energy::Float64
-    proxy_energy::Float64
+    relaxed_internal_energy::Float64
     elastic_energy::Float64
     positive_elastic_energy::Float64
     negative_elastic_energy::Float64
     fracture_energy::Float64
     nonlinear_energy::Float64
-    reaction_force::Float64
+    reaction_rlm::Float64
+    reaction_phys::Float64
     internal_energy::Float64
     external_work::Float64
     viscous_dissipation::Float64
     numerical_dissipation::Float64
-    energy_balance_residual::Float64
+    energy_inequality_violation::Float64
     phase_increment::Float64
     phase_relative_increment::Float64
     phase_equilibrium_residual::Float64
@@ -251,6 +271,7 @@ function validate_config(config::RLMConfig)
     mesh = config.mesh
     load = config.load
     time = config.time
+    qm = config.qm
     tol = config.tolerances
     output = config.output
 
@@ -289,6 +310,18 @@ function validate_config(config::RLMConfig)
             throw(ArgumentError("each load history must start from zero at t=0"))
     end
 
+    all(isfinite, (qm.q_min, qm.q_max, qm.finite_difference_step, qm.initial_curvature,
+        qm.curvature_growth, qm.majorant_abs, qm.majorant_rel)) ||
+        throw(ArgumentError("all QM parameters must be finite"))
+    qm.q_min >= 0.0 || throw(ArgumentError("qm.q_min must be nonnegative"))
+    qm.q_max > qm.q_min || throw(ArgumentError("qm.q_max must exceed qm.q_min"))
+    qm.finite_difference_step > 0.0 || throw(ArgumentError("qm.finite_difference_step must be positive"))
+    qm.initial_curvature >= 0.0 || throw(ArgumentError("qm.initial_curvature must be nonnegative"))
+    qm.curvature_growth > 1.0 || throw(ArgumentError("qm.curvature_growth must exceed one"))
+    qm.max_backtracks >= 0 || throw(ArgumentError("qm.max_backtracks must be nonnegative"))
+    qm.majorant_abs >= 0.0 && qm.majorant_rel >= 0.0 ||
+        throw(ArgumentError("QM majorant tolerances must be nonnegative"))
+
     for name in fieldnames(RLMToleranceConfig)
         value = getfield(tol, name)
         value >= 0.0 || throw(ArgumentError("tolerances.$name must be nonnegative"))
@@ -296,5 +329,7 @@ function validate_config(config::RLMConfig)
     end
     output.vtk_every_time_step > 0 ||
         throw(ArgumentError("output.vtk_every_time_step must be positive"))
+    isfinite(output.progress_refresh_seconds) && output.progress_refresh_seconds >= 0.0 ||
+        throw(ArgumentError("output.progress_refresh_seconds must be finite and nonnegative"))
     return config
 end

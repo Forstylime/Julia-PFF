@@ -42,6 +42,15 @@ end
 为交错求解格式创建位移场和相场各自的自由度处理器。
 """
 function create_dofhandlers(grid)
+    # 交错求解器的积分与形函数均基于双线性四边形。Gmsh 若未能完全重组
+    # 某个面，会留下 Triangle 单元；此时 Ferrite 会将网格存为 AbstractCell，
+    # 再在 add! 内部以不易理解的 AssertionError 失败。这里提前给出可操作的诊断。
+    nonquadrilateral_cells = unique(string.(typeof.(filter(cell -> !(cell isa Ferrite.Quadrilateral), grid.cells))))
+    isempty(nonquadrilateral_cells) || throw(ArgumentError(
+        "当前求解器仅支持四边形单元，但网格含有 $(join(nonquadrilateral_cells, ", ")). " *
+        "请在 Gmsh 中重新组合全部面并确认 .msh 中没有 type 2（三角形）元素。"
+    ))
+
     # 位移自由度处理器：每个节点有两个分量，对应 ux 和 uy。
     dh_u = Ferrite.DofHandler(grid)
     ip_u = Ferrite.Lagrange{Ferrite.RefQuadrilateral, 1}()^2

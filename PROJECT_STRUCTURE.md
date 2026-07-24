@@ -116,10 +116,11 @@ RLMConfig
 
 | 文件 | 作用 |
 |---|---|
+| `staggered_config.jl` | Staggered 的显式配置、逐步诊断和结果类型；入口是 `StaggeredConfig`、`StaggeredResult` |
 | `staggered.jl` | 结构相场的外层时间推进和位移/损伤交替迭代；`eta = 0` 为准静态，`eta > 0` 为黏性 BDF1 |
 | `rlm_ch.jl` | Cahn–Hilliard 的 RLM-PC 时间推进 |
 
-`staggered.jl` 的关键状态边界是：上一物理时间步的已接受 `d_old`，不能被时间步内的交替迭代覆盖；只有收敛后才提交新状态。
+Staggered 的调用链为 `StaggeredConfig → solve_staggered → StaggeredResult`。`staggered.jl` 的关键状态边界是：上一物理时间步的已接受 `d_old`，不能被时间步内的交替迭代覆盖；只有收敛后才提交新状态。
 
 ## 5. 运行入口
 

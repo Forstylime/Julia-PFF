@@ -459,9 +459,11 @@ end
     return rlm_quadratic_energy(problem, u, d) + rlm_nonlinear_energy(problem, u, d)
 end
 
-@inline function rlm_proxy_energy(problem::RLMProblem, u, d, q, P)
-    return rlm_quadratic_energy(problem, u, d) + P +
-           problem.config.time.alpha * (q^2 - 1.0)
+"""Relaxed original *internal* energy used by the BDF1--QM estimate."""
+@inline function rlm_relaxed_internal_energy(problem::RLMProblem, u, d, q)
+    positive, negative = rlm_elastic_split_energies(problem, u, d)
+    fracture = 0.5 * dot(d, problem.K_AT2 * d)
+    return positive + negative + fracture + problem.config.time.alpha * (q^2 - 1.0)
 end
 
 function phase_field_metrics(problem::RLMProblem, d_new, d_old)

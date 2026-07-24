@@ -23,7 +23,7 @@ function small_config(; displacement = history([0.0, 1.0, 1.0]), body = history(
             traction_boundary = "top", traction = (0.0, 3.0), traction_history = traction),
         time = RLMTimeConfig(final_time = final_time, dt = dt, alpha = 10.0),
         tolerances = RLMToleranceConfig(scalar_residual = scalar_residual),
-        output = RLMOutputConfig(write_csv = false, write_vtk = false, verbose = false))
+        output = RLMOutputConfig(write_csv = false, write_vtk = false, verbose = false, show_progress = false))
 end
 
 @testset "piecewise-linear physical-time histories" begin
@@ -35,6 +35,42 @@ end
     @test_throws ArgumentError history_value(h, -0.1)
     @test_throws ArgumentError RLMPiecewiseLinearHistory([0, 1], [0])
     @test_throws ArgumentError RLMPiecewiseLinearHistory([0, 0], [0, 1])
+end
+
+@testset "two-stage staggered displacement history" begin
+    times = [0.0, 0.5, 1.0, 2.0]
+    load = PffSAV._staggered_load_function(times, nothing, 1.0)
+    @test load(0.0) == 0.0
+    @test load(0.5) == 0.5
+    @test load(1.0) == 1.0
+    @test load(2.0) == 1.0
+    @test_throws ArgumentError PffSAV._staggered_load_function(times, t -> t, 1.0)
+    @test_throws ArgumentError PffSAV._staggered_load_function(times, nothing, 0.0)
+    @test_throws ArgumentError PffSAV._staggered_load_function(times, nothing, 2.0)
+end
+
+@testset "staggered configuration and structured diagnostics" begin
+    config = StaggeredConfig(
+        time = StaggeredTimeConfig(n_steps = 4, dt = 0.25),
+        load = StaggeredLoadConfig(ramp_time = 0.5),
+        solver = StaggeredSolverConfig(viscosity = 0.1),
+        output = StaggeredOutputConfig(write_vtk = false),
+    )
+    @test PffSAV.validate_config(config) === config
+    @test PffSAV._staggered_time_grid(config.time.n_steps, config.time.total_time,
+        config.time.time_points, config.time.dt) == [0.0, 0.25, 0.5, 0.75, 1.0]
+    @test PffSAV._staggered_load_function([0.0, 0.5, 1.0], config.load)(0.75) == 1.0
+    diagnostic = StaggeredDiagnostic(
+        step = 1, time = 0.25, dt = 0.25, load_factor = 0.5,
+        imposed_displacement = -0.4, staggered_iterations = 2, newton_iterations = 1,
+        displacement_residual = 1.0e-8, converged = true, damage_increment = 1.0e-7,
+        damage_min = 0.0, damage_max = 0.1, viscous_dissipation = 0.01,
+        cumulative_viscous_dissipation = 0.01,
+    )
+    @test diagnostic.converged && diagnostic.imposed_displacement == -0.4
+    @test_throws ArgumentError PffSAV.validate_config(StaggeredConfig(
+        solver = StaggeredSolverConfig(viscosity = -1.0),
+    ))
 end
 
 @testset "Miehe split and scalar root" begin
@@ -54,12 +90,11 @@ end
 @testset "real-time affine BDF1 step" begin
     problem = build_rlm_problem(small_config(); grid = small_grid())
     update!(problem.ch_u, 0.0)
-    state = RLMState(zeros(ndofs(problem.dh_u)), zeros(ndofs(problem.dh_d)), 1.0, 0.0)
+    state = RLMState(zeros(ndofs(problem.dh_u)), zeros(ndofs(problem.dh_d)), 1.0)
     apply!(state.u, problem.ch_u)
-    state.P = rlm_nonlinear_energy(problem, state.u, state.d)
     snapshot = copy(state)
     trial = compute_rlm_bdf1_trial(problem, state, 0.001)
-    @test state.u == snapshot.u && state.d == snapshot.d && state.q == snapshot.q && state.P == snapshot.P
+    @test state.u == snapshot.u && state.d == snapshot.d && state.q == snapshot.q
     free = free_dofs(problem.ch_u)
     equilibrium = problem.K_u * trial.u + trial.q * trial.n_u - problem.f_ext
     @test norm(equilibrium[free]) <= 1.0e-9
@@ -67,9 +102,12 @@ end
             problem.K_AT2 * trial.d + trial.q * trial.n_d
     @test norm(phase) <= 1.0e-9
     @test trial.c1 <= 1.0e-12
+    @test trial.A >= problem.config.time.alpha + 0.5 * trial.curvature - 1.0e-12
     @test trial.scalar_residual <= problem.config.tolerances.scalar_residual
-    @test trial.energy_balance_residual <= problem.config.tolerances.energy_balance_rel
+    @test trial.majorant_margin >= -problem.config.qm.majorant_abs
+    @test trial.energy_inequality_violation <= problem.config.tolerances.energy_balance_rel
     @test isfinite(trial.external_work) && isfinite(trial.viscous_dissipation)
+    @test isfinite(trial.reaction_rlm) && isfinite(trial.reaction_phys)
 end
 
 @testset "one update per physical time step and continuous q/P" begin
@@ -80,13 +118,23 @@ end
     @test [d.step for d in result.diagnostics] == [0, 1, 2]
     @test [d.time for d in result.diagnostics] ≈ [0.0, 0.001, 0.002]
     @test all(d -> isfinite(d.cumulative_external_work), result.diagnostics)
-    @test all(d -> isfinite(d.energy_balance_residual), result.diagnostics[2:end])
+    @test all(d -> isfinite(d.energy_inequality_violation), result.diagnostics[2:end])
     @test !any(d -> occursin("reset", d.status), result.diagnostics)
     mktempdir() do directory
         path = joinpath(directory, "history.csv")
         write_rlm_time_history(path, result.diagnostics)
         @test length(readlines(path)) == 4
     end
+end
+
+@testset "QM root interval and backtracking rollback" begin
+    base = small_config()
+    narrow = RLMConfig(material = base.material, mesh = base.mesh, load = base.load, time = base.time,
+        qm = RLMQMConfig(q_min = 1.1, q_max = 1.2, max_backtracks = 1),
+        tolerances = base.tolerances, output = base.output)
+    result = solve_rlm_bdf1(build_rlm_problem(narrow; grid = small_grid()))
+    @test !result.success
+    @test occursin("qm_no_admissible_root", last(result.diagnostics).status)
 end
 
 @testset "time-dependent body and traction factors" begin

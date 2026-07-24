@@ -28,6 +28,7 @@ include("rlm/scalar_solver.jl")
 include("rlm/solver_bdf1.jl")
 
 # solvers
+include("solvers/staggered_config.jl")
 include("solvers/staggered.jl")
 include("solvers/rlm_ch.jl")
 
@@ -43,6 +44,7 @@ export
     RLMPiecewiseLinearHistory,
     RLMLoadConfig,
     RLMTimeConfig,
+    RLMQMConfig,
     RLMToleranceConfig,
     RLMOutputConfig,
     RLMConfig,
@@ -51,6 +53,13 @@ export
     RLMTrial,
     RLMResult,
     RLMProblem,
+    StaggeredTimeConfig,
+    StaggeredLoadConfig,
+    StaggeredSolverConfig,
+    StaggeredOutputConfig,
+    StaggeredConfig,
+    StaggeredDiagnostic,
+    StaggeredResult,
     CHParams,
     CHState,
     CHSetup,
@@ -74,7 +83,7 @@ export
     rlm_nonlinear_energy,
     rlm_elastic_split_energies,
     rlm_raw_energy,
-    rlm_proxy_energy,
+    rlm_relaxed_internal_energy,
     phase_field_metrics,
     history_value,
     update_rlm_external_force!,

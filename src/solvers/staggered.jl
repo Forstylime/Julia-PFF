@@ -1,22 +1,27 @@
 using Ferrite
 using LinearAlgebra
 
-const DEFAULT_STAGGERED_OUTPUT_INTERVAL = 5
-const DEFAULT_MAX_NEWTON_ITERATIONS = 10
+const DEFAULT_STAGGERED_OUTPUT_INTERVAL = 100
+const DEFAULT_MAX_NEWTON_ITERATIONS = 20
 
-function _validate_staggered_options(
-    n_steps::Integer,
-    tolerance::Real,
-    max_staggered_iterations::Integer,
-    max_newton_iterations::Integer,
-    vtk_interval::Integer,
-)
-    n_steps > 0 || throw(ArgumentError("n_steps must be positive"))
-    tolerance > 0 || throw(ArgumentError("tol must be positive"))
-    max_staggered_iterations > 0 || throw(ArgumentError("max_iter must be positive"))
-    max_newton_iterations > 0 || throw(ArgumentError("max_newton_iter must be positive"))
-    vtk_interval > 0 || throw(ArgumentError("vtk_interval must be positive"))
-    return nothing
+function validate_config(config::StaggeredConfig)
+    time = config.time
+    solver = config.solver
+    output = config.output
+    isfinite(time.total_time) || throw(ArgumentError("time.total_time must be finite"))
+    (isnothing(time.dt) || isfinite(time.dt)) || throw(ArgumentError("time.dt must be finite"))
+    all(isfinite, (solver.tolerance, solver.viscosity)) ||
+        throw(ArgumentError("solver tolerance and viscosity must be finite"))
+    time.n_steps > 0 || throw(ArgumentError("time.n_steps must be positive"))
+    solver.tolerance > 0 || throw(ArgumentError("solver.tolerance must be positive"))
+    solver.max_staggered_iterations > 0 ||
+        throw(ArgumentError("solver.max_staggered_iterations must be positive"))
+    solver.max_newton_iterations > 0 ||
+        throw(ArgumentError("solver.max_newton_iterations must be positive"))
+    solver.viscosity >= 0 || throw(ArgumentError("solver.viscosity must be non-negative"))
+    output.vtk_interval > 0 || throw(ArgumentError("output.vtk_interval must be positive"))
+    _staggered_time_grid(time.n_steps, time.total_time, time.time_points, time.dt)
+    return config
 end
 
 function _staggered_time_grid(
@@ -41,6 +46,41 @@ function _staggered_time_grid(
     all(isfinite, times) || throw(ArgumentError("time_points must be finite"))
     all(diff(times) .> 0) || throw(ArgumentError("time_points must be strictly increasing"))
     return times
+end
+
+"""
+    _staggered_load_function(times, load_history, ramp_time)
+
+Build the displacement load-factor history.  `ramp_time` selects a two-stage
+history: a linear ramp from zero to one followed by a constant hold.  A custom
+`load_history` and `ramp_time` are mutually exclusive so that the prescribed
+boundary condition is unambiguous.
+"""
+function _staggered_load_function(
+    times::AbstractVector{<:Real},
+    load_history::Union{Nothing,Function},
+    ramp_time::Union{Nothing,Real},
+)
+    if !isnothing(ramp_time)
+        isnothing(load_history) ||
+            throw(ArgumentError("ramp_time and load_history cannot be used together"))
+        isfinite(ramp_time) || throw(ArgumentError("ramp_time must be finite"))
+        0.0 < ramp_time < times[end] ||
+            throw(ArgumentError("ramp_time must lie strictly between zero and the final time"))
+        return t -> min(float(t) / float(ramp_time), 1.0)
+    end
+    return isnothing(load_history) ? (t -> t / times[end]) : load_history
+end
+
+_staggered_load_function(times, load::StaggeredLoadConfig) =
+    _staggered_load_function(times, load.load_history, load.ramp_time)
+
+function _staggered_output_directory(config::StaggeredConfig)
+    output = config.output
+    !isnothing(output.directory) && return output.directory
+    suffix = config.solver.viscosity > 0 ? "staggered_bdf1" :
+             (config.solver.enforce_irreversibility ? "staggered" : "staggered2")
+    return joinpath("data", "sims", suffix)
 end
 
 function _solve_displacement!(
@@ -150,65 +190,36 @@ function _write_staggered_vtk(output_directory, setup::TensionSetup, displacemen
 end
 
 """
-    solve_staggered(setup, material; kwargs...)
+    solve_staggered(setup, material, config)
 
 Solve the first-order phase-field fracture model with the staggered scheme. At
 each load step, the displacement and damage subproblems are solved alternately
 until the damage increment satisfies `tol`.
 
-The function returns `(displacements, reaction_forces, elastic_energies,
-surface_energies)`, preserving the original public API.
+The function returns a `StaggeredResult`. Its `u_final` and `d_final` fields
+contain the raw final degree-of-freedom vectors.
 
-# Keywords
-- `n_steps=100`: number of displacement-controlled load steps.
-- `tol=1e-5`: convergence tolerance for both inner solves.
-- `max_iter=20`: maximum staggered iterations per load step.
-- `max_newton_iter=10`: maximum Newton iterations per displacement solve.
-- `enforce_irreversibility=true`: use the maximum tensile-energy history field.
-- `eta=0`: phase-field viscosity. Positive values enable BDF1 real-time evolution.
-- `dt=nothing`: physical BDF1 time step; mutually exclusive with `time_points`.
-- `total_time=1`: end time used when `time_points` and `dt` are omitted.
-- `time_points=nothing`: strictly increasing physical-time nodes (including zero).
-- `load_history=nothing`: function of physical time returning the load factor.
-- `return_diagnostics=false`: return a named result including time-step diagnostics.
-- `output_directory=nothing`: VTK directory. A mode-specific default is used
-  when omitted.
-- `write_vtk=true`: enable VTK output.
-- `vtk_interval=5`: write every N load steps, plus the final step.
-- `verbose=true`: print load-step progress and the run summary.
+`StaggeredConfig` groups physical time, displacement loading, nonlinear solver,
+and output controls. A keyword-based compatibility wrapper is defined below.
 """
 function solve_staggered(
     setup::TensionSetup,
-    material::MaterialParams;
-    n_steps::Integer = 100,
-    tol::Real = 1.0e-5,
-    max_iter::Integer = 20,
-    max_newton_iter::Integer = DEFAULT_MAX_NEWTON_ITERATIONS,
-    enforce_irreversibility::Bool = true,
-    eta::Real = 0.0,
-    dt::Union{Nothing,Real} = nothing,
-    total_time::Real = 1.0,
-    time_points::Union{Nothing,AbstractVector} = nothing,
-    load_history::Union{Nothing,Function} = nothing,
-    return_diagnostics::Bool = false,
-    output_directory::Union{Nothing,AbstractString} = nothing,
-    write_vtk::Bool = true,
-    vtk_interval::Integer = DEFAULT_STAGGERED_OUTPUT_INTERVAL,
-    verbose::Bool = true,
+    material::MaterialParams,
+    config::StaggeredConfig,
 )
-    _validate_staggered_options(n_steps, tol, max_iter, max_newton_iter, vtk_interval)
-    eta >= 0 || throw(ArgumentError("eta must be non-negative"))
-    times = _staggered_time_grid(n_steps, total_time, time_points, dt)
-    load_at_time = isnothing(load_history) ? (t -> t / times[end]) : load_history
-
-    vtk_directory = if isnothing(output_directory)
-        suffix = eta > 0 ? "staggered_bdf1" :
-                 (enforce_irreversibility ? "staggered" : "staggered2")
-        joinpath("data", "sims", suffix)
-    else
-        String(output_directory)
-    end
-    write_vtk && mkpath(vtk_directory)
+    validate_config(config)
+    time_config = config.time
+    solver_config = config.solver
+    output_config = config.output
+    times = _staggered_time_grid(
+        time_config.n_steps,
+        time_config.total_time,
+        time_config.time_points,
+        time_config.dt,
+    )
+    load_at_time = _staggered_load_function(times, config.load)
+    vtk_directory = _staggered_output_directory(config)
+    output_config.write_vtk && mkpath(vtk_directory)
 
     right_boundary_dofs = get_right_dofs(setup.grid, setup.dh_u, setup.dir)
     n_displacement_dofs = ndofs(setup.dh_u)
@@ -242,16 +253,17 @@ function solve_staggered(
     reaction_forces = Float64[0.0]
     elastic_energies = Float64[0.0]
     surface_energies = Float64[0.0]
-    diagnostics = NamedTuple[]
+    diagnostics = StaggeredDiagnostic[]
     cumulative_viscous_dissipation = 0.0
 
     started_at = time()
     total_newton_iterations = 0
-    verbose && println("开始 Staggered 交错求解，总步数: $n_steps")
+    output_config.verbose && println("开始 Staggered 交错求解，总步数: $(time_config.n_steps)")
+    completed = true
 
-    for step in 1:n_steps
+    for step in 1:time_config.n_steps
         physical_time = times[step + 1]
-        dt = physical_time - times[step]
+        step_dt = physical_time - times[step]
         load_factor = float(load_at_time(physical_time))
         isfinite(load_factor) || throw(ArgumentError("load_history must return a finite factor"))
         imposed_displacement = load_factor * setup.final_displacement
@@ -262,8 +274,8 @@ function solve_staggered(
         apply!(displacement, setup.ch_u)
         apply!(damage, setup.ch_d)
 
-        verbose && println(
-            "=== 物理时间步 $step / $n_steps | t = ",
+        output_config.verbose && println(
+            "=== 物理时间步 $step / $(time_config.n_steps) | t = ",
             round(physical_time; digits = 6),
             " | 位移: ",
             round(imposed_displacement; digits = 5),
@@ -277,7 +289,9 @@ function solve_staggered(
         staggered_converged = false
         staggered_iterations = 0
         last_damage_increment = Inf
-        for staggered_iteration in 1:max_iter
+        last_newton_iterations = 0
+        last_displacement_residual = NaN
+        for staggered_iteration in 1:solver_config.max_staggered_iterations
             staggered_iterations = staggered_iteration
             newton = _solve_displacement!(
                 displacement_stiffness,
@@ -288,10 +302,12 @@ function solve_staggered(
                 material,
                 displacement_values,
                 damage_values;
-                tolerance = tol,
-                max_iterations = max_newton_iter,
+                tolerance = solver_config.tolerance,
+                max_iterations = solver_config.max_newton_iterations,
             )
             total_newton_iterations += newton.iteration
+            last_newton_iterations = newton.iteration
+            last_displacement_residual = newton.residual_norm
             newton.converged || @warn(
                 "位移子问题未在最大 Newton 迭代次数内收敛",
                 load_step = step,
@@ -310,7 +326,7 @@ function solve_staggered(
                 displacement_values,
                 false,
             )
-            if enforce_irreversibility
+            if solver_config.enforce_irreversibility
                 trial_history .= max.(history_old, current_driving_force)
             else
                 copyto!(trial_history, current_driving_force)
@@ -325,17 +341,17 @@ function solve_staggered(
                 trial_history,
                 material,
                 damage_values,
-                eta = eta,
-                dt = dt,
+                eta = solver_config.viscosity,
+                dt = step_dt,
                 d_old = d_old,
             )
             damage_increment = norm(damage - damage_before_iteration)
             last_damage_increment = damage_increment
 
-            if verbose && staggered_iteration % 5 == 0
+            if output_config.verbose && staggered_iteration % 5 == 0
                 @info "交错迭代" load_step = step staggered_iteration damage_increment
             end
-            if damage_increment < tol
+            if damage_increment < solver_config.tolerance
                 staggered_converged = true
                 break
             end
@@ -346,13 +362,23 @@ function solve_staggered(
             copyto!(displacement, previous_displacement)
             copyto!(damage, previous_damage)
             copyto!(accepted_history, history_old)
-            @warn "物理时间步未收敛，已回滚并停止求解" time_step = step physical_time max_iterations = max_iter
-            push!(diagnostics, (
-                step, time = physical_time, dt, load_factor, staggered_iterations,
-                converged = false, damage_increment = last_damage_increment,
-                damage_min = minimum(damage), damage_max = maximum(damage),
+            completed = false
+            @warn "物理时间步未收敛，已回滚并停止求解" time_step = step physical_time max_iterations = solver_config.max_staggered_iterations
+            push!(diagnostics, StaggeredDiagnostic(
+                step = step,
+                time = physical_time,
+                dt = step_dt,
+                load_factor = load_factor,
+                imposed_displacement = imposed_displacement,
+                staggered_iterations = staggered_iterations,
+                newton_iterations = last_newton_iterations,
+                displacement_residual = last_displacement_residual,
+                converged = false,
+                damage_increment = last_damage_increment,
+                damage_min = minimum(damage),
+                damage_max = maximum(damage),
                 viscous_dissipation = 0.0,
-                cumulative_viscous_dissipation,
+                cumulative_viscous_dissipation = cumulative_viscous_dissipation,
             ))
             break
         end
@@ -361,14 +387,24 @@ function solve_staggered(
         copyto!(previous_damage, damage)
         copyto!(accepted_history, trial_history)
         viscous_dissipation = _viscous_dissipation(
-            setup, damage, d_old, eta, dt, damage_values,
+            setup, damage, d_old, solver_config.viscosity, step_dt, damage_values,
         )
         cumulative_viscous_dissipation += viscous_dissipation
-        push!(diagnostics, (
-            step, time = physical_time, dt, load_factor, staggered_iterations,
-            converged = true, damage_increment = last_damage_increment,
-            damage_min = minimum(damage), damage_max = maximum(damage),
-            viscous_dissipation, cumulative_viscous_dissipation,
+        push!(diagnostics, StaggeredDiagnostic(
+            step = step,
+            time = physical_time,
+            dt = step_dt,
+            load_factor = load_factor,
+            imposed_displacement = imposed_displacement,
+            staggered_iterations = staggered_iterations,
+            newton_iterations = last_newton_iterations,
+            displacement_residual = last_displacement_residual,
+            converged = true,
+            damage_increment = last_damage_increment,
+            damage_min = minimum(damage),
+            damage_max = maximum(damage),
+            viscous_dissipation = viscous_dissipation,
+            cumulative_viscous_dissipation = cumulative_viscous_dissipation,
         ))
 
         push!(
@@ -400,23 +436,92 @@ function solve_staggered(
         push!(displacements, imposed_displacement)
         push!(reaction_forces, reaction_force)
 
-        if write_vtk && (step % vtk_interval == 0 || step == n_steps)
+        if output_config.write_vtk && (step % output_config.vtk_interval == 0 || step == time_config.n_steps)
             _write_staggered_vtk(vtk_directory, setup, displacement, damage, step)
         end
     end
 
-    if verbose
-        write_vtk && println("仿真结束！VTK 文件保存在 $vtk_directory 目录下。")
+    if output_config.verbose
+        output_config.write_vtk && println("仿真结束！VTK 文件保存在 $vtk_directory 目录下。")
         println("总 Newton 迭代次数: $total_newton_iterations")
         println("计算耗时: $(round(time() - started_at; digits = 2)) 秒")
     end
 
-    if return_diagnostics
-        return (
-            displacements, reaction_forces, elastic_energies, surface_energies,
-            times = times[1:length(displacements)], diagnostics,
-            cumulative_viscous_dissipation,
-        )
-    end
-    return displacements, reaction_forces, elastic_energies, surface_energies
+    message = completed ? "all staggered physical-time steps completed" :
+              "staggered solver stopped after a non-converged physical-time step"
+    return StaggeredResult(
+        completed,
+        completed,
+        message,
+        config,
+        times[1:length(displacements)],
+        displacements,
+        reaction_forces,
+        elastic_energies,
+        surface_energies,
+        diagnostics,
+        copy(displacement),
+        copy(damage),
+        cumulative_viscous_dissipation,
+        total_newton_iterations,
+    )
+end
+
+"""
+    solve_staggered(setup, material; kwargs...)
+
+Compatibility wrapper for the original keyword-based API. New code should pass
+a `StaggeredConfig` explicitly so time, loading, solver, and output settings
+remain grouped at the call site. With `return_diagnostics=true`, this wrapper
+returns `StaggeredResult`; otherwise it preserves the original four-vector
+return value.
+"""
+function solve_staggered(
+    setup::TensionSetup,
+    material::MaterialParams;
+    n_steps::Integer = 100,
+    tol::Real = 1.0e-5,
+    max_iter::Integer = 20,
+    max_newton_iter::Integer = DEFAULT_MAX_NEWTON_ITERATIONS,
+    enforce_irreversibility::Bool = true,
+    eta::Real = 0.0,
+    dt::Union{Nothing,Real} = nothing,
+    total_time::Real = 1.0,
+    time_points::Union{Nothing,AbstractVector} = nothing,
+    load_history::Union{Nothing,Function} = nothing,
+    ramp_time::Union{Nothing,Real} = nothing,
+    return_diagnostics::Bool = false,
+    output_directory::Union{Nothing,AbstractString} = nothing,
+    write_vtk::Bool = true,
+    vtk_interval::Integer = DEFAULT_STAGGERED_OUTPUT_INTERVAL,
+    verbose::Bool = true,
+)
+    config = StaggeredConfig(
+        time = StaggeredTimeConfig(
+            n_steps = Int(n_steps),
+            dt = isnothing(dt) ? nothing : Float64(dt),
+            total_time = Float64(total_time),
+            time_points = isnothing(time_points) ? nothing : Float64.(time_points),
+        ),
+        load = StaggeredLoadConfig(
+            load_history = load_history,
+            ramp_time = isnothing(ramp_time) ? nothing : Float64(ramp_time),
+        ),
+        solver = StaggeredSolverConfig(
+            tolerance = Float64(tol),
+            max_staggered_iterations = Int(max_iter),
+            max_newton_iterations = Int(max_newton_iter),
+            enforce_irreversibility = enforce_irreversibility,
+            viscosity = Float64(eta),
+        ),
+        output = StaggeredOutputConfig(
+            directory = isnothing(output_directory) ? nothing : String(output_directory),
+            write_vtk = write_vtk,
+            vtk_interval = Int(vtk_interval),
+            verbose = verbose,
+        ),
+    )
+    result = solve_staggered(setup, material, config)
+    return return_diagnostics ? result :
+           (result.displacements, result.reaction_forces, result.elastic_energies, result.surface_energies)
 end
